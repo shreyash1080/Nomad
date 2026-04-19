@@ -114,22 +114,37 @@ object FileProcessor {
     // ── PDF ───────────────────────────────────────────────────────────────────
     private suspend fun processPdf(context: Context, uri: Uri, name: String, size: Long): Attachment = withContext(Dispatchers.IO) {
         try {
-            // Read first 2MB max to avoid OOM
-            val limit = 2 * 1024 * 1024
-            val buffer = ByteArray(minOf(size.toInt().coerceAtLeast(1), limit))
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                var totalRead = 0
-                while (totalRead < buffer.size) {
-                    val read = input.read(buffer, totalRead, buffer.size - totalRead)
-                    if (read == -1) break
-                    totalRead += read
-                }
+            val pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return@withContext unknown(uri, name, size)
+            val renderer = android.graphics.pdf.PdfRenderer(pfd)
+            val sb = StringBuilder()
+            
+            // Process up to 5 pages to keep it fast
+            val pagesToProcess = minOf(renderer.pageCount, 5)
+            for (i in 0 until pagesToProcess) {
+                val page = renderer.openPage(i)
+                val bitmap = Bitmap.createBitmap(page.width, page.height, Bitmap.Config.ARGB_8888)
+                bitmap.eraseColor(Color.WHITE)
+                page.render(bitmap, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                
+                val image = com.google.mlkit.vision.common.InputImage.fromBitmap(bitmap, 0)
+                val recognizer = com.google.mlkit.vision.text.TextRecognition.getClient(com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS)
+                val result = com.google.android.gms.tasks.Tasks.await(recognizer.process(image))
+                sb.append(result.text).append("\n")
+                
+                page.close()
+                bitmap.recycle()
             }
-            val text = extractPdfText(buffer)
-            Attachment(uri, name, AttachmentType.PDF, text, null, size)
+            renderer.close()
+            pfd.close()
+
+            val text = sb.toString().trim()
+            val finalContent = if (text.isBlank()) "PDF file: '$name'. No text could be extracted." 
+                               else "Content of PDF '$name':\n$text"
+            
+            Attachment(uri, name, AttachmentType.PDF, finalContent, null, size)
         } catch (e: Exception) {
             Attachment(uri, name, AttachmentType.PDF,
-                "PDF file: '$name' (${formatSize(size)}). Could not extract text: ${e.message}", null, size)
+                "PDF file: '$name' (${formatSize(size)}). Error: ${e.message}", null, size)
         }
     }
 
@@ -152,37 +167,55 @@ object FileProcessor {
         }
     }
 
-    // ── EXCEL (basic — reads as CSV-like text) ────────────────────────────────
+    // ── EXCEL (XLSX) ──────────────────────────────────────────────────────────
     private suspend fun processExcel(context: Context, uri: Uri, name: String, size: Long): Attachment = withContext(Dispatchers.IO) {
         try {
-            val limit = 1 * 1024 * 1024 // 1MB
-            val buffer = ByteArray(minOf(size.toInt().coerceAtLeast(1), limit))
+            val sb = StringBuilder()
             context.contentResolver.openInputStream(uri)?.use { input ->
-                input.read(buffer)
+                val zip = java.util.zip.ZipInputStream(input)
+                var entry = zip.nextEntry
+                while (entry != null) {
+                    if (entry.name == "xl/sharedStrings.xml" || entry.name.contains("sheet")) {
+                        val text = zip.bufferedReader().readText()
+                        // Simple regex to extract content between <t> and </t> or <v> and </v>
+                        val matches = Regex("<[tv][^>]*>(.*?)</[tv]>").findAll(text)
+                        matches.forEach { sb.append(it.groupValues[1]).append(" ") }
+                    }
+                    entry = zip.nextEntry
+                }
             }
-            val text = extractStringsFromBinary(buffer)
+            val text = sb.toString().trim().take(10000)
             Attachment(uri, name, AttachmentType.EXCEL,
-                "Excel file '$name' (${formatSize(size)}). Extracted content:\n$text", null, size)
+                "Excel file '$name' content:\n$text", null, size)
         } catch (e: Exception) {
             Attachment(uri, name, AttachmentType.EXCEL,
-                "Excel file: '$name' (${formatSize(size)}). Content could not be read.", null, size)
+                "Excel file: '$name'. Could not extract text: ${e.message}", null, size)
         }
     }
 
-    // ── WORD DOC ──────────────────────────────────────────────────────────────
+    // ── WORD (DOCX) ───────────────────────────────────────────────────────────
     private suspend fun processWord(context: Context, uri: Uri, name: String, size: Long): Attachment = withContext(Dispatchers.IO) {
         try {
-            val limit = 1 * 1024 * 1024 // 1MB
-            val buffer = ByteArray(minOf(size.toInt().coerceAtLeast(1), limit))
+            val sb = StringBuilder()
             context.contentResolver.openInputStream(uri)?.use { input ->
-                input.read(buffer)
+                val zip = java.util.zip.ZipInputStream(input)
+                var entry = zip.nextEntry
+                while (entry != null) {
+                    if (entry.name == "word/document.xml") {
+                        val text = zip.bufferedReader().readText()
+                        // Extract content between <w:t> and </w:t>
+                        val matches = Regex("<w:t[^>]*>(.*?)</w:t>").findAll(text)
+                        matches.forEach { sb.append(it.groupValues[1]).append(" ") }
+                    }
+                    entry = zip.nextEntry
+                }
             }
-            val text = extractStringsFromBinary(buffer)
+            val text = sb.toString().trim().take(10000)
             Attachment(uri, name, AttachmentType.WORD,
-                "Word document '$name' (${formatSize(size)}). Content:\n$text", null, size)
+                "Word document '$name' content:\n$text", null, size)
         } catch (e: Exception) {
             Attachment(uri, name, AttachmentType.WORD,
-                "Word document: '$name'. Could not extract text.", null, size)
+                "Word document: '$name'. Could not extract text: ${e.message}", null, size)
         }
     }
 

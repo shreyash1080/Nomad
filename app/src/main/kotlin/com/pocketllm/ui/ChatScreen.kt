@@ -130,7 +130,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
                 }
             }
             if (state.loadingModel) LoadingOverlay(state.loadProgress)
-            
+
             state.error?.let { err ->
                 Snackbar(
                     modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
@@ -160,8 +160,8 @@ private fun ChatTopBar(state: ChatUiState, onClear: () -> Unit) {
         },
         actions = {
             if (state.messages.isNotEmpty())
-                IconButton(onClick = onClear) { 
-                    Icon(Icons.Default.DeleteSweep, "Clear Chat", tint = MaterialTheme.colorScheme.onSurfaceVariant) 
+                IconButton(onClick = onClear) {
+                    Icon(Icons.Default.DeleteSweep, "Clear Chat", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
         },
         colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
@@ -363,7 +363,7 @@ private fun ChatInputBar(
                 maxLines      = 6,
                 enabled       = !isGenerating
             )
-            
+
             Spacer(Modifier.width(8.dp))
 
             if (isGenerating) {
