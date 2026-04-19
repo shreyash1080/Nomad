@@ -1,0 +1,54 @@
+# ==========================================
+# 🤖 LOCAL AI MODEL FILES (Do not push these)
+# ==========================================
+*.gguf
+*.bin
+*.pt
+*.safetensors
+models/
+app/src/main/assets/models/
+
+# ==========================================
+# 🏗️ ANDROID STUDIO & GRADLE BUILD FILES
+# ==========================================
+*.iml
+.gradle
+/local.properties
+/.idea/caches/
+/.idea/libraries/
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# ==========================================
+# 📱 COMPILED APP OUTPUTS (APKs)
+# ==========================================
+*.apk
+*.ap_
+*.aab
+
+# ==========================================
+# ⚙️ C++ / NDK / LLAMA.CPP CACHE
+# ==========================================
+CMakeLists.txt.user
+app/build/
+app/.cxx/
+
+# ==========================================
+# 💻 OS GENERATED FILES
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.hprof
