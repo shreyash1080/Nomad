@@ -3,12 +3,13 @@ package com.pocketllm.data
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Base64
+import androidx.core.graphics.applyCanvas
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.scale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -78,8 +79,12 @@ object FileProcessor {
             val decodeOptions = BitmapFactory.Options().apply {
                 this.inSampleSize = inSampleSize
             }
-            val bitmap = context.contentResolver.openInputStream(uri)?.use {
-                BitmapFactory.decodeStream(it, null, decodeOptions)
+            val bitmap = try {
+                context.contentResolver.openInputStream(uri)?.use {
+                    BitmapFactory.decodeStream(it, null, decodeOptions)
+                }
+            } catch (e: Exception) {
+                null
             } ?: return@withContext unknown(uri, name, size)
 
             // Make a small thumbnail for the chat bubble
@@ -121,18 +126,31 @@ object FileProcessor {
             // Process up to 5 pages to keep it fast
             val pagesToProcess = minOf(renderer.pageCount, 5)
             for (i in 0 until pagesToProcess) {
-                val page = renderer.openPage(i)
-                val bitmap = Bitmap.createBitmap(page.width, page.height, Bitmap.Config.ARGB_8888)
-                bitmap.eraseColor(Color.WHITE)
-                page.render(bitmap, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                
-                val image = com.google.mlkit.vision.common.InputImage.fromBitmap(bitmap, 0)
-                val recognizer = com.google.mlkit.vision.text.TextRecognition.getClient(com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS)
-                val result = com.google.android.gms.tasks.Tasks.await(recognizer.process(image))
-                sb.append(result.text).append("\n")
-                
-                page.close()
-                bitmap.recycle()
+                var page: android.graphics.pdf.PdfRenderer.Page? = null
+                var bitmap: Bitmap? = null
+                try {
+                    page = renderer.openPage(i)
+                    
+                    // Limit bitmap size to avoid OOM. ~1.5MP is plenty for OCR.
+                    val maxDim = 1200
+                    val scale = minOf(maxDim.toFloat() / page.width, maxDim.toFloat() / page.height, 1.0f)
+                    val w = (page.width * scale).toInt().coerceAtLeast(1)
+                    val h = (page.height * scale).toInt().coerceAtLeast(1)
+                    
+                    bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    bitmap.eraseColor(Color.WHITE)
+                    page.render(bitmap, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    
+                    val image = com.google.mlkit.vision.common.InputImage.fromBitmap(bitmap, 0)
+                    val recognizer = com.google.mlkit.vision.text.TextRecognition.getClient(com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS)
+                    val result = com.google.android.gms.tasks.Tasks.await(recognizer.process(image))
+                    sb.append(result.text).append("\n")
+                } catch (e: Throwable) {
+                    sb.append("[Error on page $i: ${e.message}]\n")
+                } finally {
+                    page?.close()
+                    bitmap?.recycle()
+                }
             }
             renderer.close()
             pfd.close()
@@ -160,7 +178,7 @@ object FileProcessor {
                 }
             } ?: ""
             
-            val trimmed = if (text.length >= 10000) text + "\n[... truncated]" else text
+            val trimmed = if (text.length >= 10000) "$text\n[... truncated]" else text
             Attachment(uri, name, type, "File '$name':\n$trimmed", null, size)
         } catch (e: Exception) {
             Attachment(uri, name, type, "Could not read file: ${e.message}", null, size)
@@ -221,81 +239,11 @@ object FileProcessor {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /** Very basic PDF text extractor — finds BT...ET blocks and (text) strings */
-    private fun extractPdfText(bytes: ByteArray): String {
-        val raw    = String(bytes, Charsets.ISO_8859_1)
-        val result = StringBuilder()
-
-        // Extract text between BT and ET markers (Basic PDF text extraction)
-        var i = 0
-        while (i < raw.length) {
-            val btIdx = raw.indexOf("BT", i)
-            if (btIdx < 0) break
-            val etIdx = raw.indexOf("ET", btIdx)
-            if (etIdx < 0) break
-            val block = raw.substring(btIdx, etIdx)
-            // Find (text) strings in this block
-            var j = 0
-            while (j < block.length) {
-                val start = block.indexOf('(', j)
-                if (start < 0) break
-                val end = findCloseParen(block, start)
-                if (end < 0) break
-                val piece = block.substring(start + 1, end)
-                    .replace("\\n", "\n")
-                    .replace("\\r", "")
-                    .replace("\\(", "(")
-                    .replace("\\)", ")")
-                if (piece.isNotBlank() && piece.all { it.code in 32..126 || it == '\n' })
-                    result.append(piece).append(" ")
-                j = end + 1
-            }
-            i = etIdx + 2
-        }
-
-        val text = result.toString().trim()
-        return if (text.isBlank()) "PDF file — text could not be extracted (possibly scanned/image-based)."
-        else text.take(6000)
-    }
-
-    private fun findCloseParen(s: String, open: Int): Int {
-        var i = open + 1
-        while (i < s.length) {
-            when {
-                s[i] == '\\' -> i += 2
-                s[i] == ')'  -> return i
-                else         -> i++
-            }
-        }
-        return -1
-    }
-
-    /** Extract readable ASCII strings from binary (works for docx/xlsx XML inside ZIP) */
-    private fun extractStringsFromBinary(bytes: ByteArray): String {
-        // docx/xlsx are ZIP files — scan for XML text content
-        val sb  = StringBuilder()
-        val raw = String(bytes, Charsets.ISO_8859_1)
-
-        // Find XML text content between > and <
-        var i = 0
-        while (i < raw.length && sb.length < 5000) {
-            val gt = raw.indexOf('>', i)
-            if (gt < 0) break
-            val lt = raw.indexOf('<', gt)
-            if (lt < 0) break
-            val piece = raw.substring(gt + 1, lt).trim()
-            if (piece.length > 1 && piece.all { it.code in 32..126 })
-                sb.append(piece).append(" ")
-            i = lt + 1
-        }
-        return sb.toString().trim().take(5000).ifBlank { "Could not extract readable text." }
-    }
-
     private fun makeThumbnail(bmp: Bitmap, size: Int): Bitmap {
         val scale  = size.toFloat() / maxOf(bmp.width, bmp.height)
         val w      = (bmp.width  * scale).toInt().coerceAtLeast(1)
         val h      = (bmp.height * scale).toInt().coerceAtLeast(1)
-        return Bitmap.createScaledBitmap(bmp, w, h, true)
+        return bmp.scale(w, h, true)
     }
 
     private fun bitmapToBase64(bmp: Bitmap): String {

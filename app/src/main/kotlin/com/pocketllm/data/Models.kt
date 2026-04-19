@@ -8,6 +8,7 @@ data class ChatMessage(
     val id: Long               = System.currentTimeMillis() + (Math.random() * 1000).toLong(),
     val role: Role,
     val content: String,
+    val thought: String?       = null,
     val isStreaming: Boolean   = false,
     val attachment: Attachment? = null
 )
@@ -22,7 +23,8 @@ data class ModelInfo(
     val filename: String,
     val paramCount: String,        // display string e.g. "3.8B"
     val quantization: String,
-    val isRecommended: Boolean = false
+    val isRecommended: Boolean = false,
+    val supportsThinking: Boolean = false
 ) {
     /** Numeric GB value parsed from ramRequired — used for auto-load filtering */
     val ramRequirementGb: Double get() =

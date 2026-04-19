@@ -16,9 +16,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.compose.ui.unit.dp
 import com.pocketllm.ui.ChatScreen
-import com.pocketllm.ui.ModelsScreen
-import com.pocketllm.ui.theme.PocketLLMTheme
+import com.pocketllm.ui.theme.EigenTheme
 import com.pocketllm.viewmodel.ChatViewModel
 
 class MainActivity : ComponentActivity() {
@@ -28,50 +28,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            PocketLLMTheme {
-                PocketLLMApp(viewModel)
+            EigenTheme {
+                EigenApp(viewModel)
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PocketLLMApp(viewModel: ChatViewModel) {
-    val navController = rememberNavController()
-    val navBackStackEntry by navController.currentBackStackEntryAsState()
-    val currentRoute = navBackStackEntry?.destination?.route ?: "chat"
-
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        bottomBar = {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = currentRoute == "chat",
-                    onClick  = { navController.navigate("chat") {
-                        popUpTo("chat") { inclusive = true }
-                    }},
-                    icon     = { Icon(Icons.Default.Chat, "Chat") },
-                    label    = { Text("Chat") }
-                )
-                NavigationBarItem(
-                    selected = currentRoute == "models",
-                    onClick  = { navController.navigate("models") {
-                        popUpTo("chat")
-                    }},
-                    icon     = { Icon(Icons.Default.SmartToy, "Models") },
-                    label    = { Text("Models") }
-                )
-            }
-        }
-    ) { innerPadding ->
-        NavHost(
-            navController    = navController,
-            startDestination = "chat",
-            modifier         = Modifier.padding(innerPadding)
-        ) {
-            composable("chat")   { ChatScreen(viewModel) }
-            composable("models") { ModelsScreen(viewModel) }
-        }
-    }
+fun EigenApp(viewModel: ChatViewModel) {
+    ChatScreen(viewModel)
 }

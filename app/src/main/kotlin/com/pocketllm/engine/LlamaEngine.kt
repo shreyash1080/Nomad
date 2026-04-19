@@ -29,12 +29,10 @@ object LlamaEngine {
         callback: TokenCallback
     ): String
 
-    const val DEFAULT_CTX     = 1536   // 1536 > 2048 for faster KV alloc; plenty for chat
+    const val DEFAULT_CTX     = 2048   // Increased from 1536 to prevent crashes with documents
     const val DEFAULT_THREADS = 0      // 0 = auto P-core detect in C++
     const val DEFAULT_MAXTOK  = 300
-
-    private const val SYSTEM_PROMPT =
-        "You are a helpful AI assistant. Be concise and accurate."
+    const val DEFAULT_SYSTEM  = "You are a helpful AI assistant named Eigen. Be concise and accurate. If the user input is nonsense or random characters, politely ask for clarification instead of responding with gibberish."
 
     init { System.loadLibrary("pocketllm_jni") }
 
@@ -44,6 +42,7 @@ object LlamaEngine {
         contextSize: Int = DEFAULT_CTX,
         threads: Int     = DEFAULT_THREADS,
         useGpu: Boolean  = true,
+        systemPrompt: String = DEFAULT_SYSTEM,
         onProgress: (Float) -> Unit = {}
     ): Result<Unit> = withContext(Dispatchers.IO) {
         try {
@@ -52,7 +51,7 @@ object LlamaEngine {
             if (!ok) return@withContext Result.failure(RuntimeException("loadModel failed"))
             onProgress(0.8f)
             // Cache system prefix — every chat turn will skip decoding these tokens
-            val prefix = buildSystemPrefix(SYSTEM_PROMPT)
+            val prefix = buildSystemPrefix(systemPrompt)
             val cached = cacheSystemPrompt(prefix)
             if (!cached) Log.w(TAG, "Prefix cache failed — will re-decode each turn")
             onProgress(1f)
@@ -86,7 +85,7 @@ object LlamaEngine {
     // ── Prompt builders ───────────────────────────────────────────────────────
 
     /** System prefix only — must match EXACTLY what's passed to cacheSystemPrompt */
-    fun buildSystemPrefix(systemPrompt: String = SYSTEM_PROMPT): String =
+    fun buildSystemPrefix(systemPrompt: String = DEFAULT_SYSTEM): String =
         "<|im_start|>system\n$systemPrompt<|im_end|>\n"
 
     /**
@@ -97,7 +96,7 @@ object LlamaEngine {
      */
     fun buildChatPrompt(
         modelName: String,
-        systemPrompt: String = SYSTEM_PROMPT,
+        systemPrompt: String = DEFAULT_SYSTEM,
         history: List<Pair<String, String>>,
         userMessage: String,
         fileContext: String = ""
