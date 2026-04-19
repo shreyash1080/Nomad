@@ -1,18 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
+    <!-- Storage for Android 12 and below -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <!-- Granular media permissions for Android 13+ -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
 
-    <!-- Recommend GPU-capable device -->
     <uses-feature android:name="android.hardware.vulkan.version"
-        android:version="0x00401000"
-        android:required="false" />
+        android:version="0x00401000" android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -22,8 +19,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.PocketLLM"
         android:largeHeap="true"
-        android:hardwareAccelerated="true"
-        android:usesCleartextTraffic="true">
+        android:hardwareAccelerated="true">
 
         <activity
             android:name=".MainActivity"
@@ -36,14 +32,15 @@
             </intent-filter>
         </activity>
 
-        <!-- WorkManager for background downloads -->
+        <!-- Required for file picker via ActivityResultContracts.GetContent -->
         <provider
-            android:name="androidx.startup.InitializationProvider"
-            android:authorities="${applicationId}.androidx-startup"
-            android:exported="false">
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
             <meta-data
-                android:name="androidx.work.WorkManagerInitializer"
-                android:value="androidx.startup" />
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
         </provider>
 
     </application>

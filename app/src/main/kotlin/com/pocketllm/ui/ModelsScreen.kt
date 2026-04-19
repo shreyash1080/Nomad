@@ -7,12 +7,16 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.pocketllm.data.DownloadState
@@ -28,39 +32,50 @@ fun ModelsScreen(viewModel: ChatViewModel) {
 
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("Models") })
+            CenterAlignedTopAppBar(
+                title = { Text("Model Hub", fontWeight = FontWeight.Bold) },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            )
         }
     ) { padding ->
         LazyColumn(
             modifier        = Modifier
                 .fillMaxSize()
-                .padding(padding),
+                .padding(padding)
+                .background(MaterialTheme.colorScheme.surface),
             contentPadding  = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Section: RAM guide
             item {
-                RamGuideCard()
-                Spacer(Modifier.height(8.dp))
+                DeviceStatusCard(state.totalDeviceRamGb)
+            }
+
+            item {
                 Text(
-                    "Available Models",
+                    "Recommended for You",
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.ExtraBold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
                 )
             }
 
             items(state.models, key = { it.id }) { model ->
+                val isSafe = model.ramRequirementGb <= state.totalDeviceRamGb * 0.9
                 ModelCard(
                     model       = model,
                     isLoaded    = state.loadedModelId == model.id,
                     isDownloaded = viewModel.modelManager.isDownloaded(model),
                     downloadState = state.downloadStates[model.id],
                     onDownload  = { viewModel.downloadModel(model) },
-                    onCancelDownload = { viewModel.cancelDownload(model) },
+                    onCancelDownload = { viewModel.cancelDownload(model.id) },
                     onLoad      = { viewModel.loadModel(model) },
                     onUnload    = { viewModel.unloadModel() },
                     onDelete    = { viewModel.deleteModel(model) },
-                    isLoadingAny = chatState.loadingModel
+                    isLoadingAny = chatState.loadingModel,
+                    isSafe      = isSafe
                 )
             }
         }
@@ -68,35 +83,44 @@ fun ModelsScreen(viewModel: ChatViewModel) {
 }
 
 @Composable
-private fun RamGuideCard() {
+private fun DeviceStatusCard(totalRamGb: Double) {
     Card(
+        shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
-        )
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+        ),
+        elevation = CardDefaults.cardElevation(0.dp)
     ) {
-        Column(Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Memory, contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(8.dp))
-                Text("RAM Guide", style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold)
+        Row(
+            Modifier.padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                modifier = Modifier.size(48.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Memory, null, tint = MaterialTheme.colorScheme.onPrimary)
+                }
             }
-            Spacer(Modifier.height(8.dp))
-            RamRow("8 GB phone",  "Phi-3 Mini, Gemma 2 2B, TinyLlama")
-            RamRow("12 GB phone", "+ Llama 3.2 3B")
-            RamRow("16 GB phone", "+ Qwen 2.5 7B, Mistral 7B")
-            RamRow("24 GB phone", "+ Llama 3.1 8B  (near-desktop quality)")
+            Spacer(Modifier.width(16.dp))
+            Column {
+                Text("Device Performance", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text(
+                    "Total RAM: ${"%.1f".format(totalRamGb)} GB",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    if (totalRamGb < 6) "Budget device - stick to Small models" 
+                    else if (totalRamGb < 12) "Mid-range device - 3B models recommended"
+                    else "High-end device - Large models supported",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
-    }
-}
-
-@Composable
-private fun RamRow(ram: String, models: String) {
-    Row(Modifier.padding(vertical = 2.dp)) {
-        Text("$ram: ", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-        Text(models, style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -111,198 +135,183 @@ private fun ModelCard(
     onLoad: () -> Unit,
     onUnload: () -> Unit,
     onDelete: () -> Unit,
-    isLoadingAny: Boolean
+    isLoadingAny: Boolean,
+    isSafe: Boolean
 ) {
     val isDownloading = downloadState is DownloadState.Progress ||
                         downloadState is DownloadState.Connecting
 
-    Card(
+    ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
-        border   = if (isLoaded)
-            BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
-        else null
+        shape    = RoundedCornerShape(20.dp),
+        colors   = if (isLoaded) 
+            CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f))
+            else CardDefaults.elevatedCardColors()
     ) {
-        Column(Modifier.padding(16.dp)) {
-            // Header row
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(model.name, style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold)
+                        Text(model.name, style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold)
                         if (model.isRecommended) {
-                            Spacer(Modifier.width(6.dp))
-                            AssistChip(
-                                onClick = {},
-                                label   = { Text("⭐ Recommended", style = MaterialTheme.typography.labelSmall) },
-                                modifier = Modifier.height(24.dp)
-                            )
-                        }
-                        if (isLoaded) {
-                            Spacer(Modifier.width(6.dp))
-                            AssistChip(
-                                onClick = {},
-                                label   = { Text("● Loaded", style = MaterialTheme.typography.labelSmall) },
-                                colors  = AssistChipDefaults.assistChipColors(
-                                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                                ),
-                                modifier = Modifier.height(24.dp)
-                            )
+                            Spacer(Modifier.width(8.dp))
+                            Surface(
+                                color = MaterialTheme.colorScheme.tertiaryContainer,
+                                shape = CircleShape
+                            ) {
+                                Text("⭐ BEST", 
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer)
+                            }
                         }
                     }
-                    Spacer(Modifier.height(2.dp))
+                    Spacer(Modifier.height(4.dp))
                     Text(model.description,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                
+                if (!isSafe) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(Icons.Default.Warning, "Incompatible", 
+                             modifier = Modifier.padding(6.dp).size(20.dp),
+                             tint = MaterialTheme.colorScheme.error)
+                    }
+                }
             }
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(16.dp))
 
-            // Chips: size, params, quant, RAM
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                InfoChip(Icons.Default.Storage,    model.sizeLabel)
-                InfoChip(Icons.Default.Psychology, model.paramCount)
-                InfoChip(Icons.Default.Compress,   model.quantization)
-                InfoChip(Icons.Default.Memory,     model.ramRequired)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                InfoBadge(Icons.Default.Storage,    model.sizeLabel)
+                InfoBadge(Icons.Default.Psychology, model.paramCount)
+                InfoBadge(Icons.Default.Memory,     model.ramRequired)
             }
 
-            // Download progress
             if (downloadState != null) {
-                val progress = (downloadState as? DownloadState.Progress)
-                Column(Modifier.padding(top = 8.dp)) {
-                    if (downloadState is DownloadState.Connecting) {
-                        // Using a simple text-based indicator to avoid the broken M3 LinearProgressIndicator
-                        Text("Connecting to server...", 
-                             style = MaterialTheme.typography.labelSmall,
-                             color = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.height(4.dp))
-                        Box(Modifier.fillMaxWidth().height(4.dp).background(MaterialTheme.colorScheme.surfaceVariant))
-                    } else if (progress != null) {
-                        // Custom progress bar to avoid the NoSuchMethodError in current M3 version
-                        val pct = (progress.percent / 100f).coerceIn(0f, 1f)
-                        Column {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(8.dp)
-                                    .background(
-                                        MaterialTheme.colorScheme.surfaceVariant,
-                                        shape = MaterialTheme.shapes.extraSmall
-                                    )
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth(pct)
-                                        .fillMaxHeight()
-                                        .background(
-                                            MaterialTheme.colorScheme.primary,
-                                            shape = MaterialTheme.shapes.extraSmall
-                                        )
-                                )
-                            }
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                "${progress.percent}%  (${formatBytes(progress.bytesDownloaded)} / ${formatBytes(progress.totalBytes)})",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    } else if (downloadState is DownloadState.Error) {
-                        Text("Error: ${downloadState.message}", 
-                             color = MaterialTheme.colorScheme.error,
-                             style = MaterialTheme.typography.labelSmall)
+                DownloadProgressSection(downloadState, onCancelDownload)
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (isLoaded) {
+                    Button(onClick = onUnload, modifier = Modifier.weight(1f), 
+                           colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)) {
+                        Icon(Icons.Default.PowerSettingsNew, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Unload")
+                    }
+                } else if (isDownloaded) {
+                    Button(onClick = onLoad,
+                        enabled  = !isLoadingAny && isSafe,
+                        modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Default.Bolt, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (isSafe) "Load Model" else "Too Heavy")
+                    }
+                } else if (isDownloading) {
+                    // Handled by progress section
+                } else {
+                    Button(
+                        onClick = onDownload, 
+                        modifier = Modifier.weight(1f),
+                        enabled = isSafe
+                    ) {
+                        Icon(Icons.Default.CloudDownload, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (isSafe) "Get Model" else "High RAM Required")
+                    }
+                }
+
+                if (isDownloaded || isLoaded) {
+                    IconButton(
+                        onClick = onDelete,
+                        colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Icon(Icons.Default.DeleteOutline, "Delete")
                     }
                 }
             }
-
-            Spacer(Modifier.height(12.dp))
-
-            // Action buttons
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                when {
-                    isLoaded -> {
-                        OutlinedButton(onClick = onUnload, modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Default.Eject, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Unload")
-                        }
-                        OutlinedButton(onClick = onDelete, modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                contentColor = MaterialTheme.colorScheme.error)) {
-                            Icon(Icons.Default.Delete, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Delete")
-                        }
-                    }
-                    isDownloaded -> {
-                        Button(onClick = onLoad,
-                            enabled  = !isLoadingAny,
-                            modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Default.PlayArrow, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Load")
-                        }
-                        OutlinedButton(onClick = onDelete, modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                contentColor = MaterialTheme.colorScheme.error)) {
-                            Icon(Icons.Default.Delete, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Delete")
-                        }
-                    }
-                    isDownloading -> {
-                        OutlinedButton(onClick = onCancelDownload, modifier = Modifier.weight(1f)) {
-                            SimpleSpinner(Modifier.size(16.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Cancel Download")
-                        }
-                    }
-                    else -> {
-                        Button(onClick = onDownload, modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Default.Download, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Download  ${model.sizeLabel}")
-                        }
-                    }
-                }
+            
+            if (!isSafe) {
+                Text(
+                    "⚠️ This model requires ${model.ramRequired} which exceeds your device's safety limit. Loading it might cause system instability or crashes.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 12.dp)
+                )
             }
         }
     }
 }
 
 @Composable
-private fun InfoChip(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String) {
-    SuggestionChip(
-        onClick = {},
-        label   = { Text(label, style = MaterialTheme.typography.labelSmall) },
-        icon    = { Icon(icon, null, Modifier.size(12.dp)) },
-        modifier = Modifier.height(28.dp)
-    )
+private fun DownloadProgressSection(state: DownloadState, onCancel: () -> Unit) {
+    Column(Modifier.padding(top = 16.dp)) {
+        val pct = if (state is DownloadState.Progress) state.percent / 100f else 0f
+        
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(8.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth(pct.coerceIn(0f, 1f))
+                    .fillMaxHeight()
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+        }
+        
+        Row(
+            Modifier.fillMaxWidth().padding(top = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                when (state) {
+                    is DownloadState.Connecting -> "Connecting..."
+                    is DownloadState.Progress -> "${state.percent}% (${formatBytes(state.bytesDownloaded)} / ${formatBytes(state.totalBytes)})"
+                    is DownloadState.Error -> "Error: ${state.message}"
+                    else -> ""
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = if (state is DownloadState.Error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+            )
+            
+            TextButton(onClick = onCancel, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
+                Text("Cancel")
+            }
+        }
+    }
 }
 
 @Composable
-private fun SimpleSpinner(modifier: Modifier = Modifier) {
-    val infiniteTransition = rememberInfiniteTransition(label = "spinner")
-    val rotation by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "rotation"
-    )
-
-    val color = MaterialTheme.colorScheme.primary
-    Canvas(modifier = modifier) {
-        val strokeWidth = 2.dp.toPx()
-        drawArc(
-            color = color,
-            startAngle = rotation,
-            sweepAngle = 270f,
-            useCenter = false,
-            style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeWidth)
-        )
+private fun InfoBadge(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(icon, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(6.dp))
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 

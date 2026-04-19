@@ -2,7 +2,7 @@ package com.pocketllm.engine
 
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -10,140 +10,123 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/**
- * Kotlin callback interface called from C++ for each generated token.
- * Return true to continue generation, false to stop.
- */
 interface TokenCallback {
     fun onToken(piece: String): Boolean
 }
 
-/**
- * Singleton engine that owns the llama.cpp native context.
- * All heavy work is dispatched to [Dispatchers.IO].
- */
 object LlamaEngine {
-
     private const val TAG = "LlamaEngine"
 
-    // ── Native methods declared here, implemented in llama_wrapper.cpp ──────
-    @JvmStatic external fun loadModel(
-        modelPath: String,
-        nCtx: Int,
-        nThreads: Int,
-        useGpu: Boolean
-    ): Boolean
-
+    @JvmStatic external fun loadModel(modelPath: String, nCtx: Int, nThreads: Int, useGpu: Boolean): Boolean
     @JvmStatic external fun unloadModel()
     @JvmStatic external fun isModelLoaded(): Boolean
     @JvmStatic external fun stopGeneration()
     @JvmStatic external fun getModelInfo(): String
+    @JvmStatic external fun generate(prompt: String, maxTokens: Int, temperature: Float, topP: Float, callback: TokenCallback): String
 
-    /** Blocking generate — use [generateFlow] for streaming UI. */
-    @JvmStatic external fun generate(
-        prompt: String,
-        maxTokens: Int,
-        temperature: Float,
-        topP: Float,
-        callback: TokenCallback
-    ): String
+    const val DEFAULT_CTX     = 2048
+    const val DEFAULT_THREADS = 0
+    const val DEFAULT_MAXTOK  = 512
 
-    // ── Load the shared library ──────────────────────────────────────────────
-    init {
-        System.loadLibrary("pocketllm_jni")
-        Log.i(TAG, "pocketllm_jni loaded")
-    }
+    init { System.loadLibrary("pocketllm_jni") }
 
-    // ── Public API ───────────────────────────────────────────────────────────
-
-    /**
-     * Loads a .gguf model file from [file].
-     * [onProgress] receives a 0–1 float (best-effort; llama.cpp doesn't always report it).
-     */
     suspend fun load(
         file: File,
-        contextSize: Int   = 4096,
-        threads: Int       = Runtime.getRuntime().availableProcessors().coerceAtMost(8),
-        useGpu: Boolean    = true,
+        contextSize: Int = DEFAULT_CTX,
+        threads: Int     = DEFAULT_THREADS,
+        useGpu: Boolean  = true,
         onProgress: (Float) -> Unit = {}
     ): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            Log.i(TAG, "Loading ${file.name}  ctx=$contextSize  threads=$threads  gpu=$useGpu")
-            onProgress(0.1f)
+            onProgress(0.05f)
             val ok = loadModel(file.absolutePath, contextSize, threads, useGpu)
-            onProgress(1.0f)
-            if (ok) Result.success(Unit)
-            else    Result.failure(RuntimeException("loadModel returned false"))
-        } catch (e: Exception) {
-            Log.e(TAG, "load() exception: ${e.message}")
-            Result.failure(e)
-        }
+            onProgress(1f)
+            if (ok) Result.success(Unit) else Result.failure(RuntimeException("loadModel failed"))
+        } catch (e: Exception) { Result.failure(e) }
     }
 
-    /**
-     * Streams generated text as a [Flow] of token strings.
-     */
     fun generateFlow(
         prompt: String,
-        maxTokens: Int   = 512,
+        maxTokens: Int     = DEFAULT_MAXTOK,
         temperature: Float = 0.7f,
-        topP: Float      = 0.9f
+        topP: Float        = 0.9f
     ): Flow<String> = flow {
-        if (!isModelLoaded()) {
-            emit("[ERROR: no model loaded]")
-            return@flow
-        }
-
-        val chan = kotlinx.coroutines.channels.Channel<String>(capacity = 256)
+        if (!isModelLoaded()) { emit("[ERROR: no model loaded]"); return@flow }
+        val chan = Channel<String>(capacity = 512)
         
-        // Use a local flag to handle cancellation
-        var isCancelled = false
-
-        val callback = object : TokenCallback {
-            override fun onToken(piece: String): Boolean {
-                if (isCancelled) return false
-                val sent = chan.trySend(piece).isSuccess
-                return sent
-            }
-        }
-
-        // Run generation in a separate coroutine within the flow's scope
-        kotlinx.coroutines.coroutineScope {
-            val genJob = launch(Dispatchers.IO) {
-                try {
-                    generate(prompt, maxTokens, temperature, topP, callback)
-                } finally {
-                    chan.close()
-                }
-            }
-
+        // Common stop tokens across formats
+        val stopTokens = listOf("<|im_end|>", "<|eot_id|>", "</s>", "<|end_of_text|>", "<|end|>")
+        
+        val job = kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
             try {
-                for (token in chan) {
-                    emit(token)
+                val cb = object : TokenCallback {
+                    private var fullResponse = StringBuilder()
+
+                    override fun onToken(piece: String): Boolean {
+                        fullResponse.append(piece)
+                        val currentText = fullResponse.toString()
+                        
+                        // If we see a stop token, signal the engine to stop
+                        for (stop in stopTokens) {
+                            if (currentText.contains(stop)) {
+                                return false
+                            }
+                        }
+                        
+                        chan.trySend(piece)
+                        return !chan.isClosedForSend
+                    }
                 }
-            } finally {
-                isCancelled = true
-                stopGeneration()
-                genJob.join()
-            }
+                generate(prompt, maxTokens, temperature, topP, cb)
+            } finally { chan.close() }
         }
+        for (tok in chan) emit(tok)
+        job.join()
     }.flowOn(Dispatchers.IO)
 
-    /** Builds a chat prompt using standard TinyLlama/ChatML-like format. */
+    /**
+     * Build a prompt — selects format based on model name.
+     */
     fun buildChatPrompt(
+        modelName: String,
         systemPrompt: String,
-        history: List<Pair<String, String>>,   // (user, assistant)
-        userMessage: String
-    ): String = buildString {
-        // Optimization: Use a smaller history window for faster prompt processing
-        append("<|system|>\n$systemPrompt</s>\n")
-        // Only keep last 3-4 turns to keep prompt small and processing fast
-        val recentHistory = history.takeLast(4)
-        for ((user, asst) in recentHistory) {
-            append("<|user|>\n$user</s>\n")
-            append("<|assistant|>\n$asst</s>\n")
+        history: List<Pair<String, String>>,
+        userMessage: String,
+        fileContext: String = ""
+    ): String {
+        val isLlama3 = modelName.contains("Llama-3", ignoreCase = true) || modelName.contains("Llama 3", ignoreCase = true)
+        
+        val sysContent = buildString {
+            append(systemPrompt)
+            if (fileContext.isNotBlank()) {
+                append("\n\nThe user has uploaded a file. Content:\n---\n")
+                append(fileContext.take(4000))
+                append("\n---")
+            }
         }
-        append("<|user|>\n$userMessage</s>\n")
-        append("<|assistant|>\n")
+
+        return if (isLlama3) {
+            // Llama 3 / 3.1 / 3.2 Format
+            buildString {
+                append("<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n$sysContent<|eot_id|>")
+                for ((u, a) in history.takeLast(4)) {
+                    append("<|start_header_id|>user<|end_header_id|>\n\n$u<|eot_id|>")
+                    append("<|start_header_id|>assistant<|end_header_id|>\n\n$a<|eot_id|>")
+                }
+                append("<|start_header_id|>user<|end_header_id|>\n\n$userMessage<|eot_id|>")
+                append("<|start_header_id|>assistant<|end_header_id|>\n\n")
+            }
+        } else {
+            // ChatML Format (Qwen, DeepSeek, etc.)
+            buildString {
+                append("<|im_start|>system\n$sysContent<|im_end|>\n")
+                for ((u, a) in history.takeLast(4)) {
+                    append("<|im_start|>user\n$u<|im_end|>\n")
+                    append("<|im_start|>assistant\n$a<|im_end|>\n")
+                }
+                append("<|im_start|>user\n$userMessage<|im_end|>\n")
+                append("<|im_start|>assistant\n")
+            }
+        }
     }
 }

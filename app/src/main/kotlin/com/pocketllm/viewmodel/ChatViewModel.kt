@@ -1,6 +1,9 @@
 package com.pocketllm.viewmodel
 
+import android.app.ActivityManager
 import android.app.Application
+import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketllm.data.*
@@ -9,9 +12,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import java.io.File
-
-// ── UI state ─────────────────────────────────────────────────────────────────
 
 data class ChatUiState(
     val messages: List<ChatMessage>   = emptyList(),
@@ -19,69 +19,96 @@ data class ChatUiState(
     val loadedModel: ModelInfo?       = null,
     val loadingModel: Boolean         = false,
     val loadProgress: Float           = 0f,
-    val error: String?                = null
+    val error: String?                = null,
+    val tokensPerSec: Float           = 0f,
+    val pendingAttachment: Attachment? = null,
+    val isProcessingFile: Boolean     = false
 )
 
 data class ModelsUiState(
-    val models: List<ModelInfo>                       = ModelCatalog.models,
-    val downloadStates: Map<String, DownloadState>    = emptyMap(),
-    val loadedModelId: String?                        = null
+    val models: List<ModelInfo>                    = ModelCatalog.models,
+    val downloadStates: Map<String, DownloadState> = emptyMap(),
+    val loadedModelId: String?                     = null,
+    val totalDeviceRamGb: Double                   = 0.0
 )
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     val modelManager = ModelManager(app)
-
-    private val _chatState  = MutableStateFlow(ChatUiState())
-    val chatState: StateFlow<ChatUiState> = _chatState.asStateFlow()
-
-    private val _modelsState = MutableStateFlow(ModelsUiState())
-    val modelsState: StateFlow<ModelsUiState> = _modelsState.asStateFlow()
+    private val _chat   = MutableStateFlow(ChatUiState())
+    val chatState: StateFlow<ChatUiState> = _chat.asStateFlow()
+    private val _models = MutableStateFlow(ModelsUiState())
+    val modelsState: StateFlow<ModelsUiState> = _models.asStateFlow()
 
     private var genJob: Job? = null
-    private val downloadJobs = mutableMapOf<String, Job>()
-    private val conversationHistory = mutableListOf<Pair<String, String>>()
+    private val history = ArrayDeque<Pair<String, String>>(8)
 
-    // System prompt
-    var systemPrompt: String = "You are a helpful AI assistant running locally on this device. " +
-            "Be concise, accurate, and friendly."
+    var systemPrompt = "You are a helpful AI assistant. Answer clearly and concisely."
+
+    init {
+        detectRamAndAutoLoad()
+    }
+
+    private fun detectRamAndAutoLoad() {
+        val activityManager = getApplication<Application>().getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val memoryInfo = ActivityManager.MemoryInfo()
+        activityManager.getMemoryInfo(memoryInfo)
+        val totalRamGb = memoryInfo.totalMem / 1_073_741_824.0
+        
+        _models.update { it.copy(totalDeviceRamGb = totalRamGb) }
+
+        // Auto-load best downloaded model
+        viewModelScope.launch(Dispatchers.IO) {
+            val downloaded = modelManager.listDownloaded()
+            if (downloaded.isNotEmpty()) {
+                val bestModel = ModelCatalog.models
+                    .filter { model -> downloaded.any { it.name == model.filename } }
+                    .filter { it.ramRequirementGb <= totalRamGb * 0.85 }
+                    .maxByOrNull { it.paramCountValue }
+                
+                bestModel?.let { loadModel(it) }
+            }
+        }
+    }
+
+    // ── File attachment ───────────────────────────────────────────────────────
+
+    fun attachFile(uri: Uri) {
+        viewModelScope.launch {
+            _chat.update { it.copy(isProcessingFile = true, error = null) }
+            try {
+                val attachment = FileProcessor.process(getApplication(), uri)
+                _chat.update { it.copy(pendingAttachment = attachment, isProcessingFile = false) }
+            } catch (e: Exception) {
+                _chat.update { it.copy(isProcessingFile = false, error = "Could not read file: ${e.message}") }
+            }
+        }
+    }
+
+    fun clearAttachment() {
+        _chat.update { it.copy(pendingAttachment = null) }
+    }
 
     // ── Model management ─────────────────────────────────────────────────────
 
     fun loadModel(model: ModelInfo) {
-        // RAM Check
-        val availableRamGb = getAvailableRamGb()
-        val requiredRamGb = model.ramRequired.replace(" GB RAM", "").toDoubleOrNull() ?: 0.0
-        
-        if (availableRamGb < requiredRamGb) {
-            _chatState.update { it.copy(error = "Insufficient RAM: This model requires ${model.ramRequired}, but only ${String.format("%.1f", availableRamGb)} GB is available.") }
-            return
-        }
-
         viewModelScope.launch {
-            _chatState.update { it.copy(loadingModel = true, loadProgress = 0f, error = null) }
-
+            _chat.update { it.copy(loadingModel = true, loadProgress = 0f, error = null) }
             val file = modelManager.getLocalFile(model)
             if (!file.exists()) {
-                _chatState.update { it.copy(loadingModel = false, error = "Model file not found. Please download it first.") }
+                _chat.update { it.copy(loadingModel = false, error = "File not found — download first.") }
                 return@launch
             }
-
-            LlamaEngine.load(
-                file       = file,
-                contextSize = 4096,
-                useGpu      = true,
-                onProgress  = { p -> _chatState.update { it.copy(loadProgress = p) } }
-            ).fold(
+            LlamaEngine.load(file, LlamaEngine.DEFAULT_CTX, LlamaEngine.DEFAULT_THREADS, true) { p ->
+                _chat.update { it.copy(loadProgress = p) }
+            }.fold(
                 onSuccess = {
-                    _chatState.update { it.copy(loadingModel = false, loadedModel = model, loadProgress = 1f) }
-                    _modelsState.update { it.copy(loadedModelId = model.id) }
-                    addSystemMessage("✅ ${model.name} loaded and ready!")
+                    _chat.update { it.copy(loadingModel = false, loadedModel = model, loadProgress = 1f) }
+                    _models.update { it.copy(loadedModelId = model.id) }
+                    addSysMsg("✅ ${model.name} ready!")
                 },
                 onFailure = { e ->
-                    _chatState.update { it.copy(loadingModel = false, error = "Failed to load: ${e.message}") }
+                    _chat.update { it.copy(loadingModel = false, error = "Load failed: ${e.message}") }
                 }
             )
         }
@@ -90,148 +117,125 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun unloadModel() {
         viewModelScope.launch(Dispatchers.IO) {
             LlamaEngine.unloadModel()
-            _chatState.update { it.copy(loadedModel = null) }
-            _modelsState.update { it.copy(loadedModelId = null) }
+            _chat.update { it.copy(loadedModel = null, tokensPerSec = 0f) }
+            _models.update { it.copy(loadedModelId = null) }
         }
     }
 
-    // ── Download ─────────────────────────────────────────────────────────────
+    private val downloadJobs = mutableMapOf<String, Job>()
 
     fun downloadModel(model: ModelInfo) {
-        // Cancel existing job for this model if any
-        downloadJobs[model.id]?.cancel()
-
         val job = viewModelScope.launch {
             modelManager.download(model).collect { state ->
-                _modelsState.update {
-                    it.copy(downloadStates = it.downloadStates + (model.id to state))
-                }
+                _models.update { it.copy(downloadStates = it.downloadStates + (model.id to state)) }
                 if (state is DownloadState.Done) {
                     downloadJobs.remove(model.id)
-                    // autoload after download
                     loadModel(model)
-                }
-                if (state is DownloadState.Error) {
-                    downloadJobs.remove(model.id)
                 }
             }
         }
         downloadJobs[model.id] = job
     }
 
-    fun cancelDownload(model: ModelInfo) {
-        downloadJobs[model.id]?.cancel()
-        downloadJobs.remove(model.id)
-        _modelsState.update {
-            it.copy(downloadStates = it.downloadStates - model.id)
-        }
+    fun cancelDownload(modelId: String) {
+        downloadJobs[modelId]?.cancel()
+        downloadJobs.remove(modelId)
+        _models.update { it.copy(downloadStates = it.downloadStates - modelId) }
     }
 
     fun deleteModel(model: ModelInfo) {
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                // If the model is currently loaded, unload it first
-                if (_chatState.value.loadedModel?.id == model.id) {
-                    LlamaEngine.unloadModel()
-                    _chatState.update { it.copy(loadedModel = null) }
-                }
-
-                // Ensure any active download for this model is stopped
-                downloadJobs[model.id]?.cancel()
-                downloadJobs.remove(model.id)
-
-                val success = modelManager.delete(model)
-                if (success) {
-                    _modelsState.update {
-                        it.copy(
-                            downloadStates = it.downloadStates - model.id,
-                            loadedModelId  = if (it.loadedModelId == model.id) null else it.loadedModelId
-                        )
-                    }
-                } else {
-                    _chatState.update { it.copy(error = "Failed to delete ${model.name}. File might be in use or doesn't exist.") }
-                }
-            } catch (e: Exception) {
-                _chatState.update { it.copy(error = "Error during deletion: ${e.message}") }
+            if (_chat.value.loadedModel?.id == model.id) {
+                LlamaEngine.unloadModel()
+                _chat.update { it.copy(loadedModel = null) }
+            }
+            modelManager.delete(model)
+            _models.update {
+                it.copy(
+                    downloadStates = it.downloadStates - model.id,
+                    loadedModelId = if (it.loadedModelId == model.id) null else it.loadedModelId
+                )
             }
         }
     }
 
-    // ── Chat ─────────────────────────────────────────────────────────────────
+    // ── Chat ──────────────────────────────────────────────────────────────────
 
     fun sendMessage(userText: String) {
-        if (userText.isBlank() || _chatState.value.isGenerating) return
+        if (userText.isBlank() || _chat.value.isGenerating) return
         if (!LlamaEngine.isModelLoaded()) {
-            addSystemMessage("⚠️ No model loaded. Go to Models tab to download and load one.")
+            addSysMsg("⚠️ No model loaded. Go to Models tab first.")
             return
         }
 
-        val userMsg = ChatMessage(role = Role.USER, content = userText.trim())
-        // Generate a stable ID for the assistant message so LazyColumn keys don't collide during stream
-        val assistantId = java.util.UUID.randomUUID().toString()
-        val assistantMsg = ChatMessage(id = assistantId, role = Role.ASSISTANT, content = "", isStreaming = true)
+        val attachment = _chat.value.pendingAttachment
+        val displayText = if (attachment != null) "$userText\n📎 ${attachment.fileName}" else userText
+        val fileContext = attachment?.extractedText ?: ""
 
-        _chatState.update {
+        val userMsg = ChatMessage(role = Role.USER, content = displayText, attachment = attachment)
+        val asstMsg = ChatMessage(role = Role.ASSISTANT, content = "...", isStreaming = true)
+
+        _chat.update {
             it.copy(
-                messages     = it.messages + userMsg + assistantMsg,
-                isGenerating = true,
-                error        = null
+                messages          = it.messages + userMsg + asstMsg,
+                isGenerating      = true,
+                pendingAttachment = null,
+                error             = null
             )
         }
 
-        genJob = viewModelScope.launch {
-            val startTime = System.currentTimeMillis()
-            var firstTokenTime = -1L
+        genJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val prompt = LlamaEngine.buildChatPrompt(
+                    modelName     = _chat.value.loadedModel?.name ?: "",
+                    systemPrompt  = systemPrompt,
+                    history       = history.toList(),
+                    userMessage   = userText.trim(),
+                    fileContext   = fileContext
+                )
 
-            val prompt = LlamaEngine.buildChatPrompt(
-                systemPrompt = systemPrompt,
-                history      = conversationHistory,
-                userMessage  = userText.trim()
-            )
+                val sb         = StringBuilder()
+                val t0         = System.currentTimeMillis()
+                var tokenCount = 0
 
-            val sb = StringBuilder()
-
-            LlamaEngine.generateFlow(
-                prompt      = prompt,
-                maxTokens   = 512,
-                temperature = 0.7f,
-                topP        = 0.9f
-            ).collect { token ->
-                if (firstTokenTime == -1L) {
-                    firstTokenTime = System.currentTimeMillis()
-                    val latency = firstTokenTime - startTime
-                    android.util.Log.i("ChatPerformance", "Time to first token: ${latency}ms")
-                    if (latency > 10000) {
-                        android.util.Log.w("ChatPerformance", "LATENCY WARNING: > 10s!")
+                LlamaEngine.generateFlow(
+                    prompt      = prompt,
+                    maxTokens   = LlamaEngine.DEFAULT_MAXTOK,
+                    temperature = 0.7f,
+                    topP        = 0.9f
+                ).collect { token ->
+                    sb.append(token)
+                    tokenCount++
+                    _chat.update { state ->
+                        val msgs = state.messages.toMutableList()
+                        val idx  = msgs.lastIndex
+                        if (idx >= 0 && msgs[idx].role == Role.ASSISTANT)
+                            msgs[idx] = msgs[idx].copy(content = sb.toString())
+                        state.copy(messages = msgs)
                     }
                 }
 
-                sb.append(token)
-                // Update the last (streaming) message
-                _chatState.update { state ->
-                    val updated = state.messages.toMutableList()
-                    val lastIdx = updated.lastIndex
-                    if (lastIdx >= 0 && updated[lastIdx].role == Role.ASSISTANT) {
-                        updated[lastIdx] = updated[lastIdx].copy(content = sb.toString())
-                    }
-                    state.copy(messages = updated)
-                }
-            }
+                val tps = tokenCount * 1000f / (System.currentTimeMillis() - t0).coerceAtLeast(1)
+                val finalText = sb.toString().trim()
 
-            // Mark streaming done
-            val finalText = sb.toString()
-            conversationHistory.add(Pair(userText, finalText))
+                if (history.size >= 8) history.removeFirst()
+                history.addLast(Pair(userText.trim(), finalText))
 
-            _chatState.update { state ->
-                val updated = state.messages.toMutableList()
-                val lastIdx = updated.lastIndex
-                if (lastIdx >= 0 && updated[lastIdx].role == Role.ASSISTANT) {
-                    updated[lastIdx] = updated[lastIdx].copy(
-                        content     = finalText,
-                        isStreaming = false
-                    )
+                _chat.update { state ->
+                    val msgs = state.messages.toMutableList()
+                    val idx  = msgs.lastIndex
+                    if (idx >= 0 && msgs[idx].role == Role.ASSISTANT)
+                        msgs[idx] = msgs[idx].copy(content = if (finalText.isEmpty()) "(No response)" else finalText, isStreaming = false)
+                    state.copy(isGenerating = false, tokensPerSec = tps)
                 }
-                state.copy(messages = updated, isGenerating = false)
+            } catch (e: Exception) {
+                _chat.update { state ->
+                    val msgs = state.messages.toMutableList()
+                    val idx  = msgs.lastIndex
+                    if (idx >= 0 && msgs[idx].role == Role.ASSISTANT)
+                        msgs[idx] = msgs[idx].copy(content = "Error during generation: ${e.message}", isStreaming = false)
+                    state.copy(isGenerating = false, error = e.message)
+                }
             }
         }
     }
@@ -239,30 +243,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun stopGeneration() {
         LlamaEngine.stopGeneration()
         genJob?.cancel()
-        _chatState.update { it.copy(isGenerating = false) }
+        _chat.update { it.copy(isGenerating = false) }
     }
 
     fun clearChat() {
-        conversationHistory.clear()
-        _chatState.update { it.copy(messages = emptyList()) }
+        history.clear()
+        _chat.update { it.copy(messages = emptyList(), pendingAttachment = null, tokensPerSec = 0f) }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
-
-    private fun getAvailableRamGb(): Double {
-        return try {
-            val activityManager = getApplication<Application>().getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-            val memoryInfo = android.app.ActivityManager.MemoryInfo()
-            activityManager.getMemoryInfo(memoryInfo)
-            memoryInfo.totalMem.toDouble() / (1024 * 1024 * 1024)
-        } catch (e: Exception) {
-            4.0 // Fallback to a safe middle ground if check fails
-        }
-    }
-
-    private fun addSystemMessage(text: String) {
-        _chatState.update {
-            it.copy(messages = it.messages + ChatMessage(id = java.util.UUID.randomUUID().toString(), role = Role.SYSTEM, content = text))
-        }
+    private fun addSysMsg(t: String) {
+        _chat.update { it.copy(messages = it.messages + ChatMessage(role = Role.SYSTEM, content = t)) }
     }
 }
