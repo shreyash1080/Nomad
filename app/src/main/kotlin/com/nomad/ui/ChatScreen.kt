@@ -997,8 +997,8 @@ private fun SettingsSheet(
             Slider(
                 value = state.maxTokens.toFloat(),
                 onValueChange = { onUpdateMaxTokens(it.toInt()) },
-                valueRange = 64f..2048f,
-                steps = 31,
+                valueRange = 64f..8192f,
+                steps = 63,
                 colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(alpha = 0.2f))
             )
 
@@ -1201,7 +1201,7 @@ private fun MessageBubble(
                 }
 
                     if (msg.isStreaming && msg.content == "...") {
-                        Box(modifier = Modifier.padding(top = 8.dp)) {
+                        Box(modifier = Modifier.padding(vertical = 12.dp)) {
                             Column {
                                 if (state.isSearchingWeb && msg.role == Role.ASSISTANT) {
                                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
@@ -1244,8 +1244,10 @@ private fun MessageBubble(
                 }
 
                 if (msg.isStreaming) {
-                    // Removed blinking green cursor for pure white theme
-                    TerminalCursor()
+                    // Only show cursor if we've actually started getting content
+                    if (msg.content != "...") {
+                        TerminalCursor()
+                    }
                 }
             }
         }
@@ -1643,10 +1645,10 @@ fun TerminalCursor() {
     )
     Box(
         Modifier
-            .padding(start = 2.dp)
-            .size(width = 8.dp, height = 16.dp)
+            .padding(start = 2.dp, top = 2.dp)
+            .size(width = 8.dp, height = 18.dp)
             .alpha(alpha)
-            .background(Color(0xFF24A27B))
+            .background(Color.White.copy(alpha = 0.7f)) // Changed to White to match theme
     )
 }
 @Composable

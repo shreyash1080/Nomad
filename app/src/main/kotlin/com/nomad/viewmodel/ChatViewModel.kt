@@ -34,12 +34,24 @@ data class ChatUiState(
     val deviceTemp: Float = 0f,
     val pendingAttachment: Attachment? = null,
     val isProcessingFile: Boolean = false,
-    val userName: String = "User",
-    val systemPrompt: String = "You are Nomad, a helpful and efficient local AI assistant.",
+    val userName: String = "Joe",
+    val systemPrompt: String = """
+        You are Nomad, a highly intelligent and versatile on-device AI assistant.
+        Your goal is to provide exceptional assistance across various domains including coding, writing, analysis, and general knowledge.
+        
+        GUIDELINES:
+        1. Accuracy First: Provide factually correct information. If unsure, state your limitations.
+        2. Technical Excellence: When writing code, ensure it is modern, idiomatic, and follows best practices for the specific language or framework.
+        3. Contextual Awareness: Pay close attention to previous messages in the conversation to maintain consistency.
+        4. Structured Responses: Use Markdown (headers, lists, code blocks) to make your answers easy to read.
+        5. Adaptive Tone: Maintain a professional yet helpful and approachable persona.
+        6. On-Device Nature: You are running locally on the user's mobile device. Be efficient with resources while delivering high-quality output.
+        7. Web & Files: Use the specific tools provided (Web Search, File Analysis) to augment your knowledge when relevant.
+    """.trimIndent(),
     val useGpu: Boolean = true,
     val saveChat: Boolean = true,
     val temperature: Float = 0.7f,
-    val maxTokens: Int = 512,
+    val maxTokens: Int = 1600,
     val performanceMode: PerformanceMode = PerformanceMode.BALANCED,
     val responseMode: ResponseMode = ResponseMode.BALANCED,
     val preferredLanguage: String = "English",
@@ -47,10 +59,10 @@ data class ChatUiState(
     val currentSessionId: String? = null,
     val isFirstLaunch: Boolean = true,
     val localFileHelperEnabled: Boolean = false,
-    val webSearchEnabled: Boolean = false,
+    val webSearchEnabled: Boolean = true,
     val isSearchingWeb: Boolean = false,
     val showPermissionRationale: Boolean = false,
-    val contextLength: Int = 2048,
+    val contextLength: Int = 4096,
     val loadStatus: String = "Loading model..."
 )
 
@@ -98,16 +110,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val isFirstLaunch = prefs.getBoolean("is_first_launch", true)
         _chat.update {
             it.copy(
-                userName = prefs.getString("user_name", "User") ?: "User",
+                userName = prefs.getString("user_name", "Joe") ?: "Joe",
                 systemPrompt = prefs.getString(
                     "system_prompt",
-                    "You are Nomad, a helpful and efficient local AI assistant."
-                ) ?: "You are Nomad, a helpful and efficient local AI assistant.",
+                    """
+                        You are Nomad, a highly intelligent and versatile on-device AI assistant.
+                        Your goal is to provide exceptional assistance across various domains including coding, writing, analysis, and general knowledge.
+                        
+                        GUIDELINES:
+                        1. Accuracy First: Provide factually correct information. If unsure, state your limitations.
+                        2. Technical Excellence: When writing code, ensure it is modern, idiomatic, and follows best practices for the specific language or framework.
+                        3. Contextual Awareness: Pay close attention to previous messages in the conversation to maintain consistency.
+                        4. Structured Responses: Use Markdown (headers, lists, code blocks) to make your answers easy to read.
+                        5. Adaptive Tone: Maintain a professional yet helpful and approachable persona.
+                        6. On-Device Nature: You are running locally on the user's mobile device. Be efficient with resources while delivering high-quality output.
+                        7. Web & Files: Use the specific tools provided (Web Search, File Analysis) to augment your knowledge when relevant.
+                    """.trimIndent()
+                ) ?: "",
                 isFirstLaunch = isFirstLaunch,
                 useGpu = prefs.getBoolean("use_gpu", true),
                 saveChat = prefs.getBoolean("save_chat", true),
                 temperature = prefs.getFloat("temperature", 0.7f),
-                maxTokens = prefs.getInt("max_tokens", 512),
+                maxTokens = prefs.getInt("max_tokens", 1600),
                 performanceMode = PerformanceMode.valueOf(
                     prefs.getString("perf_mode", "BALANCED") ?: "BALANCED"
                 ),
@@ -116,8 +140,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 ),
                 preferredLanguage = prefs.getString("language", "English") ?: "English",
                 localFileHelperEnabled = prefs.getBoolean("local_file_helper", false),
-                webSearchEnabled = prefs.getBoolean("web_search_enabled", false),
-                contextLength = prefs.getInt("context_length", 2048)
+                webSearchEnabled = prefs.getBoolean("web_search_enabled", true),
+                contextLength = prefs.getInt("context_length", 4096)
             )
         }
         startPerformanceMonitoring()
@@ -593,6 +617,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             } catch (_: CancellationException) {
                 // Stopped by user — normal exit
+                _chat.update { state ->
+                    val msgs = state.messages.toMutableList()
+                    val idx = msgs.lastIndex
+                    if (idx >= 0 && msgs[idx].role == Role.ASSISTANT) {
+                        msgs[idx] = msgs[idx].copy(
+                            content = if (msgs[idx].content == "...") "Stopped." else msgs[idx].content,
+                            isStreaming = false
+                        )
+                    }
+                    state.copy(isGenerating = false)
+                }
             } catch (e: Exception) {
                 val isCancel =
                     e is CancellationException || e.message?.contains("cancel", true) == true
@@ -763,24 +798,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun updateLocalFileHelper(enabled: Boolean) {
         if (enabled) {
-            if (hasLocalFileHelperPermission()) {
-                onPermissionResult(true)
-                // Disable web search when enabling file helper
-                if (_chat.value.webSearchEnabled) {
-                    _chat.update { it.copy(webSearchEnabled = false) }
-                    getApplication<Application>()
-                        .getSharedPreferences("nomad_prefs", Context.MODE_PRIVATE)
-                        .edit().putBoolean("web_search_enabled", false).apply()
-                }
-            } else {
-                _chat.update { it.copy(showPermissionRationale = true) }
+            _chat.update {
+                it.copy(
+                    error = "Local Insight (Beta) is currently disabled for further optimization. Please use Web Search for now.",
+                    localFileHelperEnabled = false
+                )
             }
-        } else {
-            _chat.update { it.copy(localFileHelperEnabled = false) }
-            getApplication<Application>()
-                .getSharedPreferences("nomad_prefs", Context.MODE_PRIVATE)
-                .edit().putBoolean("local_file_helper", false).apply()
+            return
         }
+        _chat.update { it.copy(localFileHelperEnabled = false) }
+        getApplication<Application>()
+            .getSharedPreferences("nomad_prefs", Context.MODE_PRIVATE)
+            .edit().putBoolean("local_file_helper", false).apply()
     }
 
     fun dismissPermissionRationale() {
@@ -1060,9 +1089,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val promptThreads = promptThreadsFor(state.performanceMode)
         val responseMode = state.responseMode
         val responseMaxTokens = when (responseMode) {
-            ResponseMode.FAST -> if (shortPrompt) minOf(state.maxTokens, 128) else minOf(state.maxTokens, 192)
-            ResponseMode.BALANCED -> if (shortPrompt) minOf(state.maxTokens, 224) else minOf(state.maxTokens, 384)
-            ResponseMode.THINKING -> if (shortPrompt) minOf(state.maxTokens, 256) else minOf(state.maxTokens, 512)
+            ResponseMode.FAST -> if (shortPrompt) minOf(state.maxTokens, 512) else minOf(state.maxTokens, 1024)
+            ResponseMode.BALANCED -> state.maxTokens
+            ResponseMode.THINKING -> state.maxTokens
         }
         val responseTemperature = when (responseMode) {
             ResponseMode.FAST -> minOf(state.temperature, 0.55f)
@@ -1110,12 +1139,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     ): ChatUiState {
         val current = _chat.value
         val tightBudget = model.ramRequirementGb >= stats.effectiveRamBudgetGb * 0.9
-        val recommendedResponseMode = when {
-            tightBudget -> ResponseMode.FAST
-            model.paramCountValue <= 2.2 -> ResponseMode.FAST
-            model.supportsThinking && stats.effectiveRamBudgetGb >= model.ramRequirementGb + 2.0 -> ResponseMode.THINKING
-            else -> ResponseMode.BALANCED
-        }
+        
+        // Default to BALANCED unless budget is extremely tight
+        val recommendedResponseMode = if (tightBudget) ResponseMode.FAST else ResponseMode.BALANCED
+        
         val recommendedPerformanceMode = when {
             model.paramCountValue >= 7.0 || model.ramRequirementGb >= stats.effectiveRamBudgetGb * 0.8 -> PerformanceMode.HIGH
             model.paramCountValue <= 2.2 -> PerformanceMode.BALANCED
@@ -1127,9 +1154,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             model.paramCountValue >= 3.0 -> 3072
             else -> 4096
         }
-        val recommendedMaxTokens = when (recommendedResponseMode) {
-            ResponseMode.FAST -> 192; ResponseMode.BALANCED -> 320; ResponseMode.THINKING -> 448
-        }
+        
+        // Default max tokens to 1600 as requested
+        val recommendedMaxTokens = 1600
+
         val recommendedTemperature = when {
             model.name.contains("Phi-3", ignoreCase = true) -> 0.55f
             model.paramCountValue <= 2.2 -> 0.65f
