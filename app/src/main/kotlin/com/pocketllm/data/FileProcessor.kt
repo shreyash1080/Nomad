@@ -1,4 +1,4 @@
-package com.pocketllm.data
+package com.eigen.data
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -31,7 +31,7 @@ data class Attachment(
 
 object FileProcessor {
 
-    suspend fun process(context: Context, uri: Uri): Attachment = withContext(Dispatchers.IO) {
+    suspend fun processUri(context: Context, uri: Uri): Attachment = withContext(Dispatchers.IO) {
         val fileName = getFileName(context, uri) ?: "file"
         val size     = getFileSize(context, uri)
         val ext      = fileName.substringAfterLast('.', "").lowercase()

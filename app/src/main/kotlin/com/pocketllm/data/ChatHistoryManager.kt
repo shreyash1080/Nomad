@@ -1,4 +1,4 @@
-package com.pocketllm.data
+package com.eigen.data
 
 import android.content.Context
 import com.google.gson.Gson

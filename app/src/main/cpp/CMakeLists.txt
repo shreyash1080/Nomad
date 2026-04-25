@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project("pocketllm")
+project("eigenllm")
 
 set(LLAMA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp)
 
@@ -40,14 +40,14 @@ endif()
 add_subdirectory(${LLAMA_DIR} llama_build)
 
 # ── JNI wrapper ───────────────────────────────────────────────────────────────
-add_library(pocketllm_jni SHARED llama_wrapper.cpp)
+add_library(eigen_jni SHARED llama_wrapper.cpp)
 
-target_include_directories(pocketllm_jni PRIVATE
+target_include_directories(eigen_jni PRIVATE
     ${LLAMA_DIR}/include
     ${LLAMA_DIR}/ggml/include
 )
 
-target_link_libraries(pocketllm_jni
+target_link_libraries(eigen_jni
     llama
     ggml
     android
@@ -55,7 +55,7 @@ target_link_libraries(pocketllm_jni
     ${VULKAN_LIB}
 )
 
-target_compile_options(pocketllm_jni PRIVATE
+target_compile_options(eigen_jni PRIVATE
     -O3
     -ffast-math
     -std=c++17

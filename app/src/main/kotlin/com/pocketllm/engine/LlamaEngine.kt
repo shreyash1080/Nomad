@@ -1,4 +1,4 @@
-package com.pocketllm.engine
+package com.eigen.engine
 
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
@@ -32,9 +32,9 @@ object LlamaEngine {
     const val DEFAULT_CTX     = 2048   // Increased from 1536 to prevent crashes with documents
     const val DEFAULT_THREADS = 0      // 0 = auto P-core detect in C++
     const val DEFAULT_MAXTOK  = 300
-    const val DEFAULT_SYSTEM  = "You are a helpful AI assistant named Eigen. Be concise and accurate. If the user input is nonsense or random characters, politely ask for clarification instead of responding with gibberish."
+    const val DEFAULT_SYSTEM  = "You are a helpful AI assistant named Eigen. Be concise and accurate."
 
-    init { System.loadLibrary("pocketllm_jni") }
+    init { System.loadLibrary("eigen_jni") }
 
     // ── Load + immediately cache system prefix ────────────────────────────────
     suspend fun load(
@@ -59,27 +59,61 @@ object LlamaEngine {
         } catch (e: Exception) { Result.failure(e) }
     }
 
+    data class InferenceMetrics(
+        val tokensPerSecond: Float = 0f,
+        val firstTokenLatencyMs: Long = 0,
+        val totalTokens: Int = 0,
+        val durationMs: Long = 0
+    )
+
     fun generateFlow(
         prompt: String,
         maxTokens: Int     = DEFAULT_MAXTOK,
         temperature: Float = 0.7f,
-        topP: Float        = 0.9f
+        topP: Float        = 0.9f,
+        smoothingDelayMs: Long = 20L
     ): Flow<String> = flow {
         if (!isModelLoaded()) { emit("[ERROR: no model loaded]"); return@flow }
-        val chan = Channel<String>(capacity = 512)
-        val job = kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
-            try {
-                val cb = object : TokenCallback {
-                    override fun onToken(piece: String): Boolean {
-                        chan.trySend(piece)
-                        return !chan.isClosedForSend
+        
+        val chan = Channel<String>(capacity = Channel.UNLIMITED)
+        val startTime = System.currentTimeMillis()
+        var firstTokenTime = 0L
+        var tokenCount = 0
+
+        withContext(Dispatchers.IO) {
+            val job = launch {
+                try {
+                    val cb = object : TokenCallback {
+                        override fun onToken(piece: String): Boolean {
+                            if (tokenCount == 0) firstTokenTime = System.currentTimeMillis()
+                            tokenCount++
+                            chan.trySend(piece)
+                            return true
+                        }
                     }
+                    generate(prompt, maxTokens, temperature, topP, cb)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Native generate failed: ${e.message}")
+                    chan.trySend("[ERROR: Inference crash]")
+                } finally {
+                    chan.close()
                 }
-                generate(prompt, maxTokens, temperature, topP, cb)
-            } finally { chan.close() }
+            }
+
+            try {
+                for (tok in chan) {
+                    emit(tok)
+                    if (smoothingDelayMs > 0) kotlinx.coroutines.delay(smoothingDelayMs)
+                }
+            } finally {
+                job.cancel()
+                job.join()
+            }
         }
-        for (tok in chan) emit(tok)
-        job.join()
+        
+        val totalTime = System.currentTimeMillis() - startTime
+        val tps = if (totalTime > 0) (tokenCount / (totalTime / 1000f)) else 0f
+        Log.i(TAG, "Inference complete: $tokenCount tokens, $tps t/s, Latency: ${firstTokenTime - startTime}ms")
     }.flowOn(Dispatchers.IO)
 
     // ── Prompt builders ───────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-package com.pocketllm.data
+package com.eigen.data
 
 import android.net.Uri
 
@@ -58,10 +58,18 @@ object ModelCatalog {
         ),
         ModelInfo(
             id = "gemma2-2b-q4", name = "Gemma 2 2B",
-            description = "Google's compact model. Fast on any phone.",
+            description = "Google's compact model. Optimized for mobile.",
             sizeLabel = "1.6 GB", ramRequired = "3 GB RAM",
             downloadUrl = "https://huggingface.co/bartowski/gemma-2-2b-it-GGUF/resolve/main/gemma-2-2b-it-Q4_K_M.gguf",
-            filename = "gemma2-2b-q4.gguf", paramCount = "2B", quantization = "Q4_K_M"
+            filename = "gemma2-2b-q4.gguf", paramCount = "2B", quantization = "Q4_K_M",
+            isRecommended = true
+        ),
+        ModelInfo(
+            id = "gemma2-9b-q4", name = "Gemma 2 9B",
+            description = "Google's powerful mid-size model. High quality answers.",
+            sizeLabel = "5.4 GB", ramRequired = "10 GB RAM",
+            downloadUrl = "https://huggingface.co/bartowski/gemma-2-9b-it-GGUF/resolve/main/gemma-2-9b-it-Q4_K_M.gguf",
+            filename = "gemma2-9b-q4.gguf", paramCount = "9B", quantization = "Q4_K_M"
         ),
         ModelInfo(
             id = "phi3-mini-q4", name = "Phi-3 Mini",

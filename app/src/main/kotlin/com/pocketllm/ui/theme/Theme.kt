@@ -1,15 +1,9 @@
-package com.pocketllm.ui.theme
+package com.eigen.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-
-// Brand colours
-val Purple80  = Color(0xFFD0BCFF)
-val Purple40  = Color(0xFF6650A4)
-val Teal80    = Color(0xFF80CBC4)
-val Teal40    = Color(0xFF00897B)
 
 private val DarkColors = darkColorScheme(
     primary        = Color.White,

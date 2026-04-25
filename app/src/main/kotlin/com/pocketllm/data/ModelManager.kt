@@ -1,5 +1,6 @@
-package com.pocketllm.data
+package com.eigen.data
 
+import android.app.ActivityManager
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -15,7 +16,7 @@ sealed class DownloadState {
     object Idle        : DownloadState()
     object Connecting  : DownloadState()
     data class Progress(val percent: Int, val bytesDownloaded: Long, val totalBytes: Long) : DownloadState()
-    data class Done(val file: File)  : DownloadState()
+    object Success : DownloadState()
     data class Error(val message: String) : DownloadState()
 }
 
@@ -27,12 +28,43 @@ class ModelManager(private val context: Context) {
         .followRedirects(true)
         .build()
 
-    /** Directory where model files are stored */
+    /** Directory where model files are stored - using media dir for persistence across reinstalls */
     val modelsDir: File get() {
-        val dir = File(context.filesDir, "models")
-        dir.mkdirs()
-        return dir
+        val mediaDirs = context.getExternalMediaDirs()
+        val baseDir = if (mediaDirs.isNotEmpty()) {
+            File(mediaDirs[0], "models")
+        } else {
+            File(context.filesDir, "models")
+        }
+        baseDir.mkdirs()
+        return baseDir
     }
+
+    fun getAvailableModels(): List<ModelInfo> = ModelCatalog.models
+
+    data class MemoryStats(
+        val physicalRamGb: Double,
+        val thresholdGb: Double,
+        val lowMemory: Boolean,
+        val memoryClassMb: Int,
+        val largeMemoryClassMb: Int
+    )
+
+    fun getMemoryStats(): MemoryStats {
+        val actManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val memInfo = ActivityManager.MemoryInfo()
+        actManager.getMemoryInfo(memInfo)
+        
+        return MemoryStats(
+            physicalRamGb = memInfo.totalMem.toDouble() / (1024 * 1024 * 1024),
+            thresholdGb = memInfo.threshold.toDouble() / (1024 * 1024 * 1024),
+            lowMemory = memInfo.lowMemory,
+            memoryClassMb = actManager.memoryClass,
+            largeMemoryClassMb = actManager.largeMemoryClass
+        )
+    }
+
+    fun getTotalRAM(): Double = getMemoryStats().physicalRamGb
 
     /** Returns the File for a model if it is already downloaded */
     fun getLocalFile(model: ModelInfo): File =
@@ -53,7 +85,7 @@ class ModelManager(private val context: Context) {
      * Downloads [model] and emits [DownloadState] updates.
      * Resumes partial downloads automatically.
      */
-    fun download(model: ModelInfo): Flow<DownloadState> = flow {
+    fun downloadModel(model: ModelInfo): Flow<DownloadState> = flow {
         emit(DownloadState.Connecting)
 
         val dest     = getLocalFile(model)
@@ -109,7 +141,7 @@ class ModelManager(private val context: Context) {
             if (tempFile.length() >= totalBytes && totalBytes > 0) {
                 tempFile.renameTo(dest)
                 emit(DownloadState.Progress(100, totalBytes, totalBytes))
-                emit(DownloadState.Done(dest))
+                emit(DownloadState.Success)
             } else {
                 emit(DownloadState.Error("Download interrupted: file incomplete"))
             }

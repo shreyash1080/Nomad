@@ -1,4 +1,4 @@
-package com.pocketllm.ui
+package com.eigen.ui
 
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -37,9 +37,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.pocketllm.data.*
-import com.pocketllm.viewmodel.ChatUiState
-import com.pocketllm.viewmodel.ChatViewModel
+import com.eigen.data.*
+import com.eigen.viewmodel.ChatUiState
+import com.eigen.viewmodel.ChatViewModel
+import com.eigen.viewmodel.PerformanceMode
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -122,7 +123,8 @@ fun ChatScreen(viewModel: ChatViewModel) {
                                 inputText = ""
                             },
                             onStop       = { viewModel.stopGeneration() },
-                            onAttach     = { filePicker.launch("*/*") }
+                            onAttach     = { filePicker.launch("*/*") },
+                            onVoiceInput = { /* TODO */ }
                         )
                     }
                 }
@@ -173,6 +175,10 @@ fun ChatScreen(viewModel: ChatViewModel) {
                         onUpdateSaveChat = { viewModel.updateSaveChat(it) },
                         onUpdateTemp = { viewModel.updateTemperature(it) },
                         onUpdateMaxTokens = { viewModel.updateMaxTokens(it) },
+                        onUpdatePerfMode = { viewModel.updatePerformanceMode(it) },
+                        onUpdateLocalFileHelper = { viewModel.updateLocalFileHelper(it) },
+                        onDismissRationale = { viewModel.dismissPermissionRationale() },
+                        onUpdateContextLength = { viewModel.updateContextLength(it) },
                         onUpdateLanguage = { viewModel.setLanguage(it) },
                         onSelectModel = { viewModel.loadModel(it) },
                         onDownloadMore = { 
@@ -410,8 +416,16 @@ private fun ChatTopBar(
             }
         },
         actions = {
-            IconButton(onClick = onSettings) {
-                Icon(Icons.Default.Settings, "Settings", tint = Color.White)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (state.tokensPerSec > 0f) {
+                    Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(end = 8.dp)) {
+                        Text("${"%.1f".format(state.tokensPerSec)} t/s", style = MaterialTheme.typography.labelSmall, color = Color(0xFF00FF00), fontWeight = FontWeight.Bold)
+                        Text("${state.firstTokenLatencyMs}ms", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                    }
+                }
+                IconButton(onClick = onSettings) {
+                    Icon(Icons.Default.Settings, "Settings", tint = Color.White)
+                }
             }
         },
         colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
@@ -432,6 +446,10 @@ private fun SettingsSheet(
     onUpdateSaveChat: (Boolean) -> Unit,
     onUpdateTemp: (Float) -> Unit,
     onUpdateMaxTokens: (Int) -> Unit,
+    onUpdatePerfMode: (PerformanceMode) -> Unit,
+    onUpdateLocalFileHelper: (Boolean) -> Unit,
+    onDismissRationale: () -> Unit,
+    onUpdateContextLength: (Int) -> Unit,
     onUpdateLanguage: (String) -> Unit,
     onSelectModel: (ModelInfo) -> Unit,
     onDownloadMore: () -> Unit,
@@ -544,6 +562,42 @@ private fun SettingsSheet(
             }
             Spacer(Modifier.height(32.dp))
 
+            // --- PERFORMANCE SETTINGS ---
+            Text("Performance Optimization", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(12.dp))
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PerformanceMode.values().forEach { mode ->
+                    val isSelected = state.performanceMode == mode
+                    Surface(
+                        onClick = { onUpdatePerfMode(mode) },
+                        modifier = Modifier.weight(1f),
+                        color = if (isSelected) Color.White else Color(0xFF111111),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, if (isSelected) Color.White else Color(0xFF222222))
+                    ) {
+                        Column(Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(mode.name, 
+                                style = MaterialTheme.typography.labelSmall, 
+                                color = if (isSelected) Color.Black else Color.White,
+                                fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+            Text(
+                text = when(state.performanceMode) {
+                    PerformanceMode.HIGH -> "Max performance. Uses more battery and may generate heat."
+                    PerformanceMode.BALANCED -> "Optimal balance between speed and battery life."
+                    PerformanceMode.POWER_SAVER -> "Slows down generation to keep device cool and save power."
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.DarkGray,
+                modifier = Modifier.padding(top = 8.dp, start = 4.dp)
+            )
+
+            Spacer(Modifier.height(24.dp))
+
             // --- USER SETTINGS ---
             Text("User Profile", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(12.dp))
@@ -605,6 +659,50 @@ private fun SettingsSheet(
                         uncheckedThumbColor = Color.Gray,
                         uncheckedTrackColor = Color(0xFF111111)
                     )
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Local File Helper", style = MaterialTheme.typography.bodyLarge)
+                    Text("Allow AI to read your local files (images, docs) to give better answers.", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                }
+                Switch(
+                    checked = state.localFileHelperEnabled,
+                    onCheckedChange = onUpdateLocalFileHelper,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.Black,
+                        checkedTrackColor = Color.White,
+                        uncheckedThumbColor = Color.Gray,
+                        uncheckedTrackColor = Color(0xFF111111)
+                    )
+                )
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // --- PERMISSION RATIONALE DIALOG ---
+            if (state.showPermissionRationale) {
+                AlertDialog(
+                    onDismissRequest = onDismissRationale,
+                    title = { Text("Storage Permission", color = Color.White) },
+                    text = { Text("Eigen needs access to your files to analyze them. This is only used locally on your device.", color = Color.Gray) },
+                    confirmButton = {
+                        TextButton(onClick = { 
+                            onUpdateLocalFileHelper(true) 
+                            onDismissRationale()
+                        }) {
+                            Text("GRANT", color = Color.White)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = onDismissRationale) {
+                            Text("CANCEL", color = Color.Gray)
+                        }
+                    },
+                    containerColor = Color(0xFF1A1A1A)
                 )
             }
 
@@ -671,10 +769,23 @@ private fun SettingsSheet(
             Spacer(Modifier.height(16.dp))
 
             Text("Max Response Length: ${state.maxTokens} tokens", style = MaterialTheme.typography.bodyMedium)
+            Text("Controls how long the AI's answers can be.", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
             Slider(
                 value = state.maxTokens.toFloat(),
                 onValueChange = { onUpdateMaxTokens(it.toInt()) },
-                valueRange = 64f..1024f,
+                valueRange = 64f..2048f,
+                steps = 31,
+                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White)
+            )
+
+            Spacer(Modifier.height(16.dp))
+
+            Text("Context Length: ${state.contextLength} tokens", style = MaterialTheme.typography.bodyMedium)
+            Text("How much the AI remembers in one conversation.", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
+            Slider(
+                value = state.contextLength.toFloat(),
+                onValueChange = { onUpdateContextLength(it.toInt()) },
+                valueRange = 512f..8192f,
                 steps = 15,
                 colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White)
             )
@@ -815,7 +926,7 @@ private fun MessageBubble(
 
             Surface(
                 shape = if (isUser) RoundedCornerShape(16.dp) else RoundedCornerShape(0.dp),
-                color = if (isUser) Color(0xFF1A1A1A) else Color.Transparent,
+                color = if (isUser && isEditing) Color(0xFF1A1A1A) else Color.Transparent,
                 border = null,
                 modifier = Modifier.widthIn(max = 320.dp)
             ) {
@@ -916,7 +1027,7 @@ private fun MessageBubble(
                             TextButton(onClick = { 
                                 onEdit(msg.id, editValue)
                                 isEditing = false 
-                            }) { Text("Save", color = Color(0xFF9B72CB)) }
+                            }) { Text("SAVE", color = Color.White, fontWeight = FontWeight.Bold) }
                         }
                     } else {
                         // --- Message Actions ---
@@ -1024,7 +1135,8 @@ private fun ChatInputBar(
     hasAttachment: Boolean,
     onSend: () -> Unit,
     onStop: () -> Unit,
-    onAttach: () -> Unit
+    onAttach: () -> Unit,
+    onVoiceInput: () -> Unit
 ) {
     Surface(
         color = Color.Black,
@@ -1038,6 +1150,17 @@ private fun ChatInputBar(
                 .padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            IconButton(
+                onClick = onVoiceInput,
+                modifier = Modifier.size(48.dp)
+            ) {
+                Icon(
+                    Icons.Default.Mic,
+                    "Voice Input",
+                    tint = Color.Gray
+                )
+            }
+
             IconButton(
                 onClick = onAttach,
                 modifier = Modifier.size(48.dp)

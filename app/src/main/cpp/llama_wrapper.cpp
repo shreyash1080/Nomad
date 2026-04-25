@@ -17,7 +17,7 @@
 #include "llama.h"
 #include "ggml.h"
 
-#define LOG_TAG "PocketLLM"
+#define LOG_TAG "Eigen"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
@@ -127,7 +127,7 @@ extern "C" {
 
 // ── loadModel ─────────────────────────────────────────────────────────────────
 JNIEXPORT jboolean JNICALL
-Java_com_pocketllm_engine_LlamaEngine_loadModel(
+Java_com_eigen_engine_LlamaEngine_loadModel(
         JNIEnv* env, jclass,
         jstring modelPath, jint nCtx, jint nThreads, jboolean useGpu)
 {
@@ -193,7 +193,7 @@ Java_com_pocketllm_engine_LlamaEngine_loadModel(
 
 // ── cacheSystemPrompt — decodes system prefix once, reused every chat turn ────
 JNIEXPORT jboolean JNICALL
-Java_com_pocketllm_engine_LlamaEngine_cacheSystemPrompt(
+Java_com_eigen_engine_LlamaEngine_cacheSystemPrompt(
         JNIEnv* env, jclass,
         jstring jPrefix)
 {
@@ -206,24 +206,33 @@ Java_com_pocketllm_engine_LlamaEngine_cacheSystemPrompt(
 
     llama_kv_cache_clear(g_ctx);
 
-    llama_batch batch = llama_batch_get_one(
-            g_prefix_tokens.data(), (int32_t)g_prefix_tokens.size());
+    llama_batch batch = llama_batch_init((int32_t)g_prefix_tokens.size(), 0, 1);
+    for (int i = 0; i < (int)g_prefix_tokens.size(); i++) {
+        batch.token[i]     = g_prefix_tokens[i];
+        batch.pos[i]       = i;
+        batch.n_seq_id[i]  = 1;
+        batch.seq_id[i][0] = 0;
+        batch.logits[i]    = false;
+    }
 
-    if (llama_decode(g_ctx, batch) != 0) {
-        LOGE("cacheSystemPrompt: decode failed");
+    int rc = llama_decode(g_ctx, batch);
+    llama_batch_free(batch);
+
+    if (rc != 0) {
+        LOGE("cacheSystemPrompt: decode failed with %d", rc);
         g_prefix_tokens.clear();
         g_prefix_n_tokens = 0;
         return JNI_FALSE;
     }
 
     g_prefix_n_tokens = (int)g_prefix_tokens.size();
-    LOGI("System prefix cached: %d tokens  (saved every turn)", g_prefix_n_tokens);
+    LOGI("System prefix cached: %d tokens", g_prefix_n_tokens);
     return JNI_TRUE;
 }
 
 // ── unloadModel ───────────────────────────────────────────────────────────────
 JNIEXPORT void JNICALL
-Java_com_pocketllm_engine_LlamaEngine_unloadModel(JNIEnv*, jclass) {
+Java_com_eigen_engine_LlamaEngine_unloadModel(JNIEnv*, jclass) {
     g_stop.store(true);
     if (g_ctx)   { llama_free(g_ctx);         g_ctx   = nullptr; }
     if (g_model) { llama_free_model(g_model);  g_model = nullptr; }
@@ -234,18 +243,18 @@ Java_com_pocketllm_engine_LlamaEngine_unloadModel(JNIEnv*, jclass) {
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_pocketllm_engine_LlamaEngine_isModelLoaded(JNIEnv*, jclass) {
+Java_com_eigen_engine_LlamaEngine_isModelLoaded(JNIEnv*, jclass) {
     return (g_model && g_ctx) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
-Java_com_pocketllm_engine_LlamaEngine_stopGeneration(JNIEnv*, jclass) {
+Java_com_eigen_engine_LlamaEngine_stopGeneration(JNIEnv*, jclass) {
     g_stop.store(true);
 }
 
 // ── generate — with KV prefix reuse ──────────────────────────────────────────
 JNIEXPORT jstring JNICALL
-Java_com_pocketllm_engine_LlamaEngine_generate(
+Java_com_eigen_engine_LlamaEngine_generate(
         JNIEnv* env, jclass,
         jstring jPrompt, jint maxTokens,
         jfloat temperature, jfloat topP,
@@ -263,71 +272,87 @@ Java_com_pocketllm_engine_LlamaEngine_generate(
     if (all_tokens.empty()) return env->NewStringUTF("[ERROR: tokenize failed]");
 
     // Truncate if prompt too long
-    int max_prompt = g_n_ctx - maxTokens - 8;
-    if ((int)all_tokens.size() > max_prompt)
+    int max_prompt = g_n_ctx - maxTokens - 16;
+    if ((int)all_tokens.size() > max_prompt) {
         all_tokens.erase(all_tokens.begin(),
                          all_tokens.begin() + ((int)all_tokens.size() - max_prompt));
+    }
 
     // ── KV PREFIX REUSE ───────────────────────────────────────────────────────
-    // If the prompt begins with the cached system prefix, skip those tokens.
-    // Saves decoding ~20-40 tokens = ~200-400ms per message.
     int decode_start = 0;
 
-    if (g_prefix_n_tokens > 0 &&
-        (int)all_tokens.size() > g_prefix_n_tokens)
-    {
+    if (g_prefix_n_tokens > 0 && (int)all_tokens.size() > g_prefix_n_tokens) {
         bool match = true;
         for (int i = 0; i < g_prefix_n_tokens; i++) {
             if (all_tokens[i] != g_prefix_tokens[i]) { match = false; break; }
         }
         if (match) {
-            // Remove any KV cells beyond the prefix (previous conversation tail)
+            // Keep prefix, remove everything after
             llama_kv_cache_seq_rm(g_ctx, 0, g_prefix_n_tokens, -1);
             decode_start = g_prefix_n_tokens;
-            LOGI("KV prefix reused: skipped %d tokens", g_prefix_n_tokens);
+            LOGI("KV prefix reused: skipping %d tokens", g_prefix_n_tokens);
         } else {
             llama_kv_cache_clear(g_ctx);
             decode_start = 0;
         }
     } else {
-        // Check headroom
-        int kv_used = llama_get_kv_cache_used_cells(g_ctx);
-        if (kv_used + (int)all_tokens.size() - decode_start + maxTokens > g_n_ctx) {
-            llama_kv_cache_clear(g_ctx);
-            decode_start = 0;
-        }
+        llama_kv_cache_clear(g_ctx);
+        decode_start = 0;
     }
 
-    // Decode only the new tokens
+    // Decode prompt suffix
     if (decode_start < (int)all_tokens.size()) {
-        llama_batch batch = llama_batch_get_one(
-                all_tokens.data() + decode_start,
-                (int32_t)(all_tokens.size() - decode_start));
-        if (llama_decode(g_ctx, batch) != 0) {
-            llama_kv_cache_clear(g_ctx);
+        int n_tokens = (int)all_tokens.size() - decode_start;
+        llama_batch batch = llama_batch_init(n_tokens, 0, 1);
+        for (int i = 0; i < n_tokens; i++) {
+            batch.token[i]     = all_tokens[decode_start + i];
+            batch.pos[i]       = decode_start + i;
+            batch.n_seq_id[i]  = 1;
+            batch.seq_id[i][0] = 0;
+            batch.logits[i]    = (i == n_tokens - 1);
+        }
+
+        int rc = llama_decode(g_ctx, batch);
+        llama_batch_free(batch);
+        if (rc != 0) {
+            LOGE("llama_decode failed: %d", rc);
             return env->NewStringUTF("[ERROR: decode failed]");
         }
     }
 
-    // Sampler
-    llama_sampler* chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    // Sampler setup
+    llama_sampler_chain_params lcp = llama_sampler_chain_default_params();
+    lcp.no_perf = true;
+    llama_sampler* chain = llama_sampler_chain_init(lcp);
+
     if (temperature < 0.01f) {
         llama_sampler_chain_add(chain, llama_sampler_init_greedy());
     } else {
         llama_sampler_chain_add(chain, llama_sampler_init_temp(temperature));
         llama_sampler_chain_add(chain, llama_sampler_init_top_p(topP, 1));
-        llama_sampler_chain_add(chain, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+        llama_sampler_chain_add(chain, llama_sampler_init_min_p(0.05f, 1));
+        llama_sampler_chain_add(chain, llama_sampler_init_dist((uint32_t)time(nullptr)));
     }
 
     jclass    cbClass = env->GetObjectClass(callback);
     jmethodID onToken = env->GetMethodID(cbClass, "onToken", "(Ljava/lang/String;)Z");
+    if (!onToken) {
+        llama_sampler_free(chain);
+        return env->NewStringUTF("[ERROR: callback method not found]");
+    }
 
     std::string result;
     char buf[256];
     bool stopped = false;
+    int n_past = (int)all_tokens.size();
 
     for (int i = 0; i < maxTokens && !g_stop.load() && !stopped; i++) {
+        if (!g_ctx) break;
+
+        // Sample from the last token's logits
         llama_token tok = llama_sampler_sample(chain, g_ctx, -1);
+        llama_sampler_accept(chain, tok);
+
         if (llama_token_is_eog(g_model, tok)) break;
 
         int n = llama_token_to_piece(g_model, tok, buf, (int32_t)sizeof(buf)-1, 0, true);
@@ -335,10 +360,10 @@ Java_com_pocketllm_engine_LlamaEngine_generate(
         buf[n] = '\0';
         result += buf;
 
+        // Check for stop sequences
         for (const auto& s : STOP_SEQS) {
-            size_t pos = result.find(s);
-            if (pos != std::string::npos) {
-                result = result.substr(0, pos);
+            if (result.size() >= s.size() && result.compare(result.size() - s.size(), s.size(), s) == 0) {
+                result.erase(result.size() - s.size());
                 stopped = true;
                 break;
             }
@@ -349,10 +374,20 @@ Java_com_pocketllm_engine_LlamaEngine_generate(
             jboolean ok = env->CallBooleanMethod(callback, onToken, jp);
             env->DeleteLocalRef(jp);
             if (!ok) break;
-        }
 
-        llama_batch nb = llama_batch_get_one(&tok, 1);
-        if (llama_decode(g_ctx, nb) != 0) break;
+            // Decode the sampled token
+            llama_batch nb = llama_batch_init(1, 0, 1);
+            nb.token[0]     = tok;
+            nb.pos[0]       = n_past;
+            nb.n_seq_id[0]  = 1;
+            nb.seq_id[0][0] = 0;
+            nb.logits[0]    = true;
+
+            int rc = llama_decode(g_ctx, nb);
+            llama_batch_free(nb);
+            if (rc != 0) break;
+            n_past++;
+        }
     }
 
     llama_sampler_free(chain);
@@ -363,7 +398,7 @@ Java_com_pocketllm_engine_LlamaEngine_generate(
 // ── getModelInfo — uses CORRECT old-style API names from working codebase ─────
 //    llama_n_ctx_train / llama_n_embd / llama_n_layer  (NOT llama_model_n_*)
 JNIEXPORT jstring JNICALL
-Java_com_pocketllm_engine_LlamaEngine_getModelInfo(JNIEnv* env, jclass) {
+Java_com_eigen_engine_LlamaEngine_getModelInfo(JNIEnv* env, jclass) {
     if (!g_model) return env->NewStringUTF("{}");
     char buf[512];
     snprintf(buf, sizeof(buf),
