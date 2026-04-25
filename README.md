@@ -1,6 +1,6 @@
-# Eigen 🛰️
+# Nomad 🛰️
 
-Eigen is a high-performance, **100% offline** LLM client for Android. Inspired by the simplicity of Gemini, it allows you to run state-of-the-art language models (like Llama 3.2) locally on your device with advanced file analysis capabilities.
+Nomad is a high-performance, **100% offline** LLM client for Android. Inspired by the simplicity of Gemini, it allows you to run state-of-the-art language models (like Llama 3.2) locally on your device with advanced file analysis capabilities.
 
 ## ✨ Features
 
@@ -21,7 +21,7 @@ Eigen is a high-performance, **100% offline** LLM client for Android. Inspired b
 
 ## 📜 Licensing & Open Source
 
-Eigen leverages several open-source technologies:
+Nomad leverages several open-source technologies:
 
 1.  **[llama.cpp](https://github.com/ggerganov/llama.cpp)** (MIT License) - The core inference engine.
 2.  **[Google ML Kit](https://developers.google.com/ml-kit)** (Google APIs Terms) - Used for on-device Text Recognition (OCR).

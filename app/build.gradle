@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace 'com.eigen'
+    namespace 'com.nomad'
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.eigen"
+        applicationId "com.nomad"
         minSdk 26
         targetSdk 34
         versionCode 1

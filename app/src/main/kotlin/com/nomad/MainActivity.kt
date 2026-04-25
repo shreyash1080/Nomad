@@ -1,4 +1,4 @@
-package com.eigen
+package com.nomad
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -8,23 +8,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Chat
-import androidx.compose.material.icons.filled.SmartToy
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
-import androidx.navigation.compose.rememberNavController
-import androidx.compose.ui.unit.dp
-import com.eigen.ui.ChatScreen
-import com.eigen.ui.theme.EigenTheme
-import com.eigen.viewmodel.ChatViewModel
+import com.nomad.ui.ChatScreen
+import com.nomad.ui.theme.NomadTheme
+import com.nomad.viewmodel.ChatViewModel
 
 class MainActivity : ComponentActivity() {
 
@@ -33,8 +21,8 @@ class MainActivity : ComponentActivity() {
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        val allGranted = permissions.all { it.value }
-        viewModel.onPermissionResult(allGranted)
+        val anyGranted = permissions.isEmpty() || permissions.any { it.value }
+        viewModel.onPermissionResult(anyGranted)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,15 +31,11 @@ class MainActivity : ComponentActivity() {
         // Listen for permission requests from ViewModel
         lifecycle.addObserver(object : androidx.lifecycle.DefaultLifecycleObserver {
             override fun onResume(owner: androidx.lifecycle.LifecycleOwner) {
-                if (viewModel.chatState.value.showPermissionRationale) {
-                    // This is just to trigger the UI rationale, but if it's already shown and we want to request
-                    // we might need a more direct way. 
-                }
             }
         })
 
         setContent {
-            EigenTheme {
+            NomadTheme {
                 val state by viewModel.chatState.collectAsState()
                 
                 // When UI sets showPermissionRationale to false AND localFileHelperEnabled is still false (but was attempted)
@@ -59,13 +43,13 @@ class MainActivity : ComponentActivity() {
                 // However, the current SettingsSheet triggers viewModel.onUpdateLocalFileHelper(true) 
                 // which should trigger the system dialog if we connect them.
                 
-                LaunchedEffect(state.localFileHelperEnabled) {
-                    if (state.localFileHelperEnabled) {
+                LaunchedEffect(state.showPermissionRationale) {
+                    if (state.showPermissionRationale) {
                         checkPermissions()
                     }
                 }
 
-                EigenApp(viewModel)
+                NomadApp(viewModel)
             }
         }
     }
@@ -86,11 +70,13 @@ class MainActivity : ComponentActivity() {
 
         if (toRequest.isNotEmpty()) {
             requestPermissionLauncher.launch(toRequest.toTypedArray())
+        } else {
+            viewModel.onPermissionResult(true)
         }
     }
 }
 
 @Composable
-fun EigenApp(viewModel: ChatViewModel) {
+fun NomadApp(viewModel: ChatViewModel) {
     ChatScreen(viewModel)
 }

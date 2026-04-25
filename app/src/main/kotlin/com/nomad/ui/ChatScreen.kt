@@ -1,7 +1,11 @@
-package com.eigen.ui
+package com.nomad.ui
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.speech.RecognizerIntent
 import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -23,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -30,6 +35,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -37,17 +43,21 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.eigen.data.*
-import com.eigen.viewmodel.ChatUiState
-import com.eigen.viewmodel.ChatViewModel
-import com.eigen.viewmodel.PerformanceMode
+import androidx.core.content.ContextCompat
+import com.nomad.data.*
+import com.nomad.viewmodel.ChatUiState
+import com.nomad.viewmodel.ChatViewModel
+import com.nomad.viewmodel.PerformanceMode
+import com.nomad.viewmodel.ResponseMode
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(viewModel: ChatViewModel) {
     val state     by viewModel.chatState.collectAsState()
     val listState = rememberLazyListState()
+    val context = LocalContext.current
     var inputText by remember { mutableStateOf("") }
     var showSettings by remember { mutableStateOf(false) }
     
@@ -57,6 +67,44 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: Uri? -> uri?.let { viewModel.attachFile(it) } }
+
+    val voiceRecognizerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val spokenText = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+            .orEmpty()
+
+        if (spokenText.isNotBlank()) {
+            inputText = spokenText
+            viewModel.sendMessage(spokenText)
+            inputText = ""
+        } else {
+            viewModel.addSysMsg("Voice input did not return any text. Please try again.")
+        }
+    }
+
+    val voicePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            val voiceIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to Nomad")
+            }
+
+            if (voiceIntent.resolveActivity(context.packageManager) != null) {
+                voiceRecognizerLauncher.launch(voiceIntent)
+            } else {
+                viewModel.addSysMsg("Voice input is not available on this device.")
+            }
+        } else {
+            viewModel.addSysMsg("Microphone permission was denied, so voice input stays off.")
+        }
+    }
 
     LaunchedEffect(state.messages.size) {
         if (state.messages.isNotEmpty())
@@ -96,6 +144,8 @@ fun ChatScreen(viewModel: ChatViewModel) {
             bottomBar = {
                 Surface(
                     color = Color.Black,
+                    tonalElevation = 0.dp,
+                    shadowElevation = 0.dp,
                     modifier = Modifier.navigationBarsPadding()
                 ) {
                     Column {
@@ -124,24 +174,65 @@ fun ChatScreen(viewModel: ChatViewModel) {
                             },
                             onStop       = { viewModel.stopGeneration() },
                             onAttach     = { filePicker.launch("*/*") },
-                            onVoiceInput = { /* TODO */ }
+                            onLocalSearch = {
+                                if (inputText.isBlank()) {
+                                    inputText = "find "
+                                } else if (!inputText.lowercase().startsWith("find")) {
+                                    inputText = "find $inputText"
+                                }
+                            },
+                            onWebSearch = {
+                                if (inputText.isBlank()) {
+                                    inputText = "search "
+                                } else if (!inputText.lowercase().startsWith("search")) {
+                                    inputText = "search $inputText"
+                                }
+                            },
+                            webSearchEnabled = state.webSearchEnabled,
+                            onVoiceInput = {
+                                if (ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.RECORD_AUDIO
+                                    ) == PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    val voiceIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+                                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to Nomad")
+                                    }
+
+                                    if (voiceIntent.resolveActivity(context.packageManager) != null) {
+                                        voiceRecognizerLauncher.launch(voiceIntent)
+                                    } else {
+                                        viewModel.addSysMsg("Voice input is not available on this device.")
+                                    }
+                                } else {
+                                    voicePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            }
                         )
                     }
                 }
             }
         ) { padding ->
-            Box(Modifier.fillMaxSize().padding(padding).background(Color.Black)) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .background(Color.Black)
+            ) {
                 if (state.messages.isEmpty()) {
                     WelcomeContent(state)
                 } else {
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 16.dp)
+                        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 20.dp)
                     ) {
-                        items(state.messages) { msg ->
+                        items(state.messages, key = { it.id }) { msg ->
                             MessageBubble(
                                 msg = msg,
+                                state = state,
                                 onEdit = { id, text -> viewModel.editMessage(id, text) }
                             )
                         }
@@ -158,11 +249,14 @@ fun ChatScreen(viewModel: ChatViewModel) {
                         onDelete = { viewModel.deleteModel(it) },
                         onDismiss = { viewModel.setFirstLaunchSeen() },
                         totalRamGb = modelsState.totalDeviceRamGb,
+                        physicalRamGb = modelsState.physicalRamGb,
+                        availableStorageGb = modelsState.availableStorageGb,
+                        recommendedModelId = modelsState.recommendedModelId,
                         isModelDownloaded = { viewModel.modelManager.getLocalFile(it).exists() }
                     )
                 }
                 
-                if (state.loadingModel) LoadingOverlay(state.loadProgress)
+                if (state.loadingModel) LoadingOverlay(state.loadProgress, state.loadStatus)
 
                 if (showSettings) {
                     val modelsState by viewModel.modelsState.collectAsState()
@@ -176,7 +270,9 @@ fun ChatScreen(viewModel: ChatViewModel) {
                         onUpdateTemp = { viewModel.updateTemperature(it) },
                         onUpdateMaxTokens = { viewModel.updateMaxTokens(it) },
                         onUpdatePerfMode = { viewModel.updatePerformanceMode(it) },
+                        onUpdateResponseMode = { viewModel.updateResponseMode(it) },
                         onUpdateLocalFileHelper = { viewModel.updateLocalFileHelper(it) },
+                        onUpdateWebSearch = { viewModel.updateWebSearchEnabled(it) },
                         onDismissRationale = { viewModel.dismissPermissionRationale() },
                         onUpdateContextLength = { viewModel.updateContextLength(it) },
                         onUpdateLanguage = { viewModel.setLanguage(it) },
@@ -186,7 +282,10 @@ fun ChatScreen(viewModel: ChatViewModel) {
                             showSettings = false
                         },
                         isModelDownloaded = { viewModel.modelManager.getLocalFile(it).exists() },
-                        models = modelsState.models
+                        models = modelsState.models,
+                        recommendedModelId = modelsState.recommendedModelId,
+                        memoryBudgetGb = modelsState.totalDeviceRamGb,
+                        physicalRamGb = modelsState.physicalRamGb
                     )
                 }
 
@@ -206,76 +305,45 @@ fun ChatScreen(viewModel: ChatViewModel) {
 @Composable
 private fun WelcomeContent(state: ChatUiState) {
     Column(
-        Modifier.fillMaxSize().padding(32.dp),
+        Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 32.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(Modifier.weight(1f))
-        
-        EigenIcon(modifier = Modifier.size(80.dp))
+        NomadIcon(modifier = Modifier.size(64.dp), color = Color.White)
         
         Spacer(Modifier.height(32.dp))
-        
-        Text("EIGEN", 
-            style = MaterialTheme.typography.displaySmall.copy(
-                fontWeight = FontWeight.Black,
-                letterSpacing = 8.sp
-            ),
-            color = Color.White
-        )
-        
-        Text("NEURAL NEWTON : PRIVATE INFERENCE", 
-            style = MaterialTheme.typography.labelMedium,
-            color = Color.Gray,
-            letterSpacing = 3.sp
-        )
 
-        Spacer(Modifier.height(64.dp))
-        
-        if (state.loadedModel == null) {
-            Surface(
-                color = Color.Transparent,
-                border = BorderStroke(1.dp, Color.DarkGray),
-                modifier = Modifier.padding(8.dp)
-            ) {
-                Text(
-                    "SYSTEM READY • CONFIGURE MODEL",
-                    color = Color.Gray,
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp
-                )
-            }
-        } else {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    "CORE ACTIVE",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 2.sp
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    state.loadedModel.name.uppercase(),
-                    color = Color.Gray,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Light,
-                    letterSpacing = 1.sp
-                )
-            }
-        }
-
-        Spacer(Modifier.height(32.dp))
         Text(
-            "OFFLINE • ENCRYPTED • SECURE",
-            style = MaterialTheme.typography.labelSmall,
-            color = Color(0xFF222222),
-            letterSpacing = 2.sp
+            "Hello, ${state.userName}",
+            style = MaterialTheme.typography.displaySmall.copy(fontWeight = FontWeight.Light),
+            color = Color.White,
+            textAlign = TextAlign.Center
+        )
+        
+        Spacer(Modifier.height(12.dp))
+        
+        Text(
+            "How can I help you today?",
+            style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Light),
+            color = Color.White.copy(alpha = 0.7f),
+            textAlign = TextAlign.Center
         )
 
-        Spacer(Modifier.weight(1.5f))
+        Spacer(Modifier.height(48.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)
+        ) {
+            StatusPill(
+                label = state.loadedModel?.name ?: "No model loaded",
+                accent = Color.White
+            )
+            StatusPill(
+                label = if (state.localFileHelperEnabled) "Local Insight ON" else "Local Insight OFF",
+                accent = Color.White
+            )
+        }
     }
 }
 
@@ -294,7 +362,7 @@ private fun ChatHistoryDrawer(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("EIGEN", 
+            Text("NOMAD", 
                 style = MaterialTheme.typography.headlineMedium, 
                 fontWeight = FontWeight.Black,
                 letterSpacing = 2.sp,
@@ -368,7 +436,7 @@ private fun ChatHistoryDrawer(
         Spacer(Modifier.height(16.dp))
         HorizontalDivider(color = Color.DarkGray)
         Spacer(Modifier.height(16.dp))
-        Text("OFFLINE NEURAL ENGINE", style = MaterialTheme.typography.labelSmall, color = Color.Gray, fontWeight = FontWeight.Bold)
+        Text("OFFLINE LOCAL AI", style = MaterialTheme.typography.labelSmall, color = Color.Gray, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -379,60 +447,105 @@ private fun ChatTopBar(
     onMenu: () -> Unit, 
     onSettings: () -> Unit
 ) {
-    CenterAlignedTopAppBar(
-        navigationIcon = {
+    Surface(
+        color = Color.Black,
+        shadowElevation = 0.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             IconButton(onClick = onMenu) {
                 Icon(Icons.Default.Menu, "Menu", tint = Color.White)
             }
-        },
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                EigenIcon(Modifier.size(20.dp))
-                Spacer(Modifier.width(12.dp))
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("EIGEN", 
-                        style = MaterialTheme.typography.titleLarge.copy(
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = 1.sp
-                        )
-                    )
-                    if (state.loadedModel != null) {
-                        Surface(
-                            color = Color(0xFF1A1A1A),
-                            shape = RoundedCornerShape(4.dp),
-                            modifier = Modifier.padding(top = 2.dp)
-                        ) {
-                            Text(
-                                state.loadedModel.name.uppercase(),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.width(32.dp)) // Offset to maintain visual center
+
+            Spacer(Modifier.width(8.dp))
+
+            Text(
+                "Nomad",
+                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Normal),
+                color = Color.White,
+                modifier = Modifier.weight(1f)
+            )
+
+            if (state.tokensPerSec > 0f) {
+                Text(
+                    "${"%.1f".format(state.tokensPerSec)} t/s",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.White.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(end = 12.dp)
+                )
             }
-        },
-        actions = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (state.tokensPerSec > 0f) {
-                    Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(end = 8.dp)) {
-                        Text("${"%.1f".format(state.tokensPerSec)} t/s", style = MaterialTheme.typography.labelSmall, color = Color(0xFF00FF00), fontWeight = FontWeight.Bold)
-                        Text("${state.firstTokenLatencyMs}ms", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
-                    }
-                }
-                IconButton(onClick = onSettings) {
-                    Icon(Icons.Default.Settings, "Settings", tint = Color.White)
-                }
+
+            IconButton(onClick = onSettings) {
+                Icon(Icons.Default.Settings, "Settings", tint = Color.White)
             }
-        },
-        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-            containerColor = Color.Black,
-            titleContentColor = Color.White
+        }
+    }
+}
+
+@Composable
+private fun StatusPill(label: String, accent: Color) {
+    Surface(
+        color = Color.Black,
+        shape = RoundedCornerShape(999.dp),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.2f))
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelMedium,
+            color = Color.White
         )
-    )
+    }
+}
+
+@Composable
+private fun ResponseModeStrip(
+    selectedMode: ResponseMode,
+    onSelect: (ResponseMode) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        ResponseMode.values().forEach { mode ->
+            val isSelected = selectedMode == mode
+            Surface(
+                onClick = { onSelect(mode) },
+                modifier = Modifier.weight(1f),
+                color = if (isSelected) Color(0xFF24A27B) else Color(0xFF11151B),
+                shape = RoundedCornerShape(18.dp),
+                border = BorderStroke(1.dp, if (isSelected) Color(0xFF3FD3A1) else Color(0xFF242C38))
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = mode.name,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = when (mode) {
+                            ResponseMode.FAST -> "Quick"
+                            ResponseMode.BALANCED -> "Normal"
+                            ResponseMode.THINKING -> "Deep"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFCFD7E1)
+                    )
+                }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -447,19 +560,25 @@ private fun SettingsSheet(
     onUpdateTemp: (Float) -> Unit,
     onUpdateMaxTokens: (Int) -> Unit,
     onUpdatePerfMode: (PerformanceMode) -> Unit,
+    onUpdateResponseMode: (ResponseMode) -> Unit,
     onUpdateLocalFileHelper: (Boolean) -> Unit,
+    onUpdateWebSearch: (Boolean) -> Unit,
     onDismissRationale: () -> Unit,
     onUpdateContextLength: (Int) -> Unit,
     onUpdateLanguage: (String) -> Unit,
     onSelectModel: (ModelInfo) -> Unit,
     onDownloadMore: () -> Unit,
     isModelDownloaded: (ModelInfo) -> Boolean,
-    models: List<ModelInfo>
+    models: List<ModelInfo>,
+    recommendedModelId: String?,
+    memoryBudgetGb: Double,
+    physicalRamGb: Double
 ) {
     var name by remember { mutableStateOf(state.userName) }
     var systemPrompt by remember { mutableStateOf(state.systemPrompt) }
     var showLangMenu by remember { mutableStateOf(false) }
     var showModelMenu by remember { mutableStateOf(false) }
+    var showResponseMenu by remember { mutableStateOf(false) }
 
     val languages = listOf(
         "English", "Hindi", "Marathi", "Gujarati", "Tamil", "Bengali",
@@ -486,7 +605,7 @@ private fun SettingsSheet(
                 .verticalScroll(rememberScrollState())
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("CONFIGURATION", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                Text("SETTINGS", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Default.Close, null, tint = Color.White)
@@ -495,9 +614,78 @@ private fun SettingsSheet(
             
             Spacer(Modifier.height(32.dp))
 
-            // --- MODEL SELECTION ---
-            Text("Active Model", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            // --- RESPONSE MODE ---
+            Text("Response Style", style = MaterialTheme.typography.labelLarge, color = Color.White)
             Spacer(Modifier.height(12.dp))
+            Box {
+                OutlinedButton(
+                    onClick = { showResponseMenu = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.3f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(state.responseMode.name, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.weight(1f))
+                        Icon(Icons.Default.ArrowDropDown, null)
+                    }
+                }
+                DropdownMenu(
+                    expanded = showResponseMenu,
+                    onDismissRequest = { showResponseMenu = false },
+                    modifier = Modifier.background(Color.Black).border(1.dp, Color.White.copy(alpha = 0.2f)).fillMaxWidth(0.85f)
+                ) {
+                    ResponseMode.values().forEach { mode ->
+                        DropdownMenuItem(
+                            text = { 
+                                Column {
+                                    Text(mode.name, color = Color.White, fontWeight = FontWeight.Bold)
+                                    Text(
+                                        when(mode) {
+                                            ResponseMode.FAST -> "Shortest and fastest replies."
+                                            ResponseMode.BALANCED -> "Balanced speed and detail."
+                                            ResponseMode.THINKING -> "Deep thinking for complex tasks."
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.White.copy(alpha = 0.6f)
+                                    )
+                                }
+                            },
+                            onClick = {
+                                onUpdateResponseMode(mode)
+                                showResponseMenu = false
+                            }
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+
+            // --- MODEL SELECTION ---
+            Text("Active Model", style = MaterialTheme.typography.labelLarge, color = Color.White)
+            Spacer(Modifier.height(12.dp))
+            recommendedModelId?.let { bestId ->
+                models.firstOrNull { it.id == bestId }?.let { bestModel ->
+                    Surface(
+                        color = Color.Black,
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, Color.White),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(14.dp)) {
+                            Text("BEST MATCH FOR THIS DEVICE", color = Color.White, fontWeight = FontWeight.Black, fontSize = 10.sp)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "${bestModel.name} (${bestModel.paramCount})",
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
+            }
             Box {
                 OutlinedButton(
                     onClick = { showModelMenu = true },
@@ -532,7 +720,24 @@ private fun SettingsSheet(
                         DropdownMenuItem(
                             text = { 
                                 Column {
-                                    Text(model.name, color = Color.White)
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(model.name, color = Color.White)
+                                        if (model.id == recommendedModelId) {
+                                            Spacer(Modifier.width(8.dp))
+                                            Surface(
+                                                color = Color(0xFF173525),
+                                                shape = RoundedCornerShape(999.dp)
+                                            ) {
+                                                Text(
+                                                    "BEST",
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = Color(0xFF86E0B5),
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+                                    }
                                     Text("${model.paramCount} • ${model.filename}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                                 }
                             },
@@ -563,7 +768,7 @@ private fun SettingsSheet(
             Spacer(Modifier.height(32.dp))
 
             // --- PERFORMANCE SETTINGS ---
-            Text("Performance Optimization", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            Text("Performance Optimization", style = MaterialTheme.typography.labelLarge, color = Color.White)
             Spacer(Modifier.height(12.dp))
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -572,9 +777,9 @@ private fun SettingsSheet(
                     Surface(
                         onClick = { onUpdatePerfMode(mode) },
                         modifier = Modifier.weight(1f),
-                        color = if (isSelected) Color.White else Color(0xFF111111),
+                        color = if (isSelected) Color.White else Color.Black,
                         shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, if (isSelected) Color.White else Color(0xFF222222))
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.3f))
                     ) {
                         Column(Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(mode.name, 
@@ -587,22 +792,22 @@ private fun SettingsSheet(
             }
             Text(
                 text = when(state.performanceMode) {
-                    PerformanceMode.HIGH -> "Max performance. Uses more battery and may generate heat."
-                    PerformanceMode.BALANCED -> "Optimal balance between speed and battery life."
-                    PerformanceMode.POWER_SAVER -> "Slows down generation to keep device cool and save power."
+                    PerformanceMode.HIGH -> "Max performance. Uses more battery."
+                    PerformanceMode.BALANCED -> "Optimal balance for daily use."
+                    PerformanceMode.POWER_SAVER -> "Slows down to keep device cool."
                 },
                 style = MaterialTheme.typography.labelSmall,
-                color = Color.DarkGray,
+                color = Color.White.copy(alpha = 0.4f),
                 modifier = Modifier.padding(top = 8.dp, start = 4.dp)
             )
 
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(32.dp))
 
             // --- USER SETTINGS ---
-            Text("User Profile", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            Text("User Profile", style = MaterialTheme.typography.labelLarge, color = Color.White)
             Spacer(Modifier.height(12.dp))
             
-            Text("Display Name", style = MaterialTheme.typography.labelMedium, color = Color.Gray)
+            Text("Display Name", style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.5f))
             Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 value = name,
@@ -611,10 +816,10 @@ private fun SettingsSheet(
                     onUpdateName(it)
                 },
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(0.dp),
+                shape = RoundedCornerShape(12.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Color.White,
-                    unfocusedBorderColor = Color(0xFF222222),
+                    unfocusedBorderColor = Color.White.copy(alpha = 0.2f),
                     focusedTextColor = Color.White,
                     unfocusedTextColor = Color.White
                 )
@@ -623,13 +828,13 @@ private fun SettingsSheet(
             Spacer(Modifier.height(24.dp))
 
             // --- AI MODEL SETTINGS ---
-            Text("AI Model Settings", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            Text("AI Model Settings", style = MaterialTheme.typography.labelLarge, color = Color.White)
             Spacer(Modifier.height(12.dp))
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("GPU Acceleration", style = MaterialTheme.typography.bodyLarge)
-                    Text("Use RAM/GPU for faster inference", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                    Text("Use RAM/GPU for faster inference", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f))
                 }
                 Switch(
                     checked = state.useGpu,
@@ -637,8 +842,8 @@ private fun SettingsSheet(
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.Black,
                         checkedTrackColor = Color.White,
-                        uncheckedThumbColor = Color.Gray,
-                        uncheckedTrackColor = Color(0xFF111111)
+                        uncheckedThumbColor = Color.White.copy(alpha = 0.5f),
+                        uncheckedTrackColor = Color.Black
                     )
                 )
             }
@@ -648,7 +853,7 @@ private fun SettingsSheet(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Save Chat History", style = MaterialTheme.typography.bodyLarge)
-                    Text("Auto-save conversations to local storage", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                    Text("Auto-save conversations to local storage", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f))
                 }
                 Switch(
                     checked = state.saveChat,
@@ -656,8 +861,8 @@ private fun SettingsSheet(
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.Black,
                         checkedTrackColor = Color.White,
-                        uncheckedThumbColor = Color.Gray,
-                        uncheckedTrackColor = Color(0xFF111111)
+                        uncheckedThumbColor = Color.White.copy(alpha = 0.5f),
+                        uncheckedTrackColor = Color.Black
                     )
                 )
             }
@@ -666,8 +871,8 @@ private fun SettingsSheet(
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Local File Helper", style = MaterialTheme.typography.bodyLarge)
-                    Text("Allow AI to read your local files (images, docs) to give better answers.", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                    Text("Local Insight Helper", style = MaterialTheme.typography.bodyLarge)
+                    Text("Allow AI to read your local files.", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f))
                 }
                 Switch(
                     checked = state.localFileHelperEnabled,
@@ -675,8 +880,27 @@ private fun SettingsSheet(
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.Black,
                         checkedTrackColor = Color.White,
-                        uncheckedThumbColor = Color.Gray,
-                        uncheckedTrackColor = Color(0xFF111111)
+                        uncheckedThumbColor = Color.White.copy(alpha = 0.5f),
+                        uncheckedTrackColor = Color.Black
+                    )
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Web Search", style = MaterialTheme.typography.bodyLarge)
+                    Text("Allow AI to search the web for real-time info.", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f))
+                }
+                Switch(
+                    checked = state.webSearchEnabled,
+                    onCheckedChange = onUpdateWebSearch,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.Black,
+                        checkedTrackColor = Color.White,
+                        uncheckedThumbColor = Color.White.copy(alpha = 0.5f),
+                        uncheckedTrackColor = Color.Black
                     )
                 )
             }
@@ -687,8 +911,8 @@ private fun SettingsSheet(
             if (state.showPermissionRationale) {
                 AlertDialog(
                     onDismissRequest = onDismissRationale,
-                    title = { Text("Storage Permission", color = Color.White) },
-                    text = { Text("Eigen needs access to your files to analyze them. This is only used locally on your device.", color = Color.Gray) },
+                    title = { Text("Local File Access", color = Color.White) },
+                    text = { Text("Nomad needs file access only when you use local file search or analyze files on this device.", color = Color.White.copy(alpha = 0.6f)) },
                     confirmButton = {
                         TextButton(onClick = { 
                             onUpdateLocalFileHelper(true) 
@@ -699,28 +923,29 @@ private fun SettingsSheet(
                     },
                     dismissButton = {
                         TextButton(onClick = onDismissRationale) {
-                            Text("CANCEL", color = Color.Gray)
+                            Text("CANCEL", color = Color.White.copy(alpha = 0.4f))
                         }
                     },
-                    containerColor = Color(0xFF1A1A1A)
+                    containerColor = Color.Black,
+                    modifier = Modifier.border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(28.dp))
                 )
             }
 
             Spacer(Modifier.height(24.dp))
 
             // --- REGIONAL SETTINGS ---
-            Text("Regional Settings", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            Text("Regional Settings", style = MaterialTheme.typography.labelLarge, color = Color.White)
             Spacer(Modifier.height(12.dp))
 
             Column {
-                Text("AI Language Preference", style = MaterialTheme.typography.labelMedium, color = Color.Gray)
+                Text("AI Language Preference", style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.5f))
                 Spacer(Modifier.height(8.dp))
                 Box {
                     OutlinedButton(
                         onClick = { showLangMenu = true },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, Color(0xFF333333)),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.2f)),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -734,7 +959,7 @@ private fun SettingsSheet(
                     DropdownMenu(
                         expanded = showLangMenu,
                         onDismissRequest = { showLangMenu = false },
-                        modifier = Modifier.background(Color(0xFF1A1A1A)).fillMaxWidth(0.8f)
+                        modifier = Modifier.background(Color.Black).border(1.dp, Color.White.copy(alpha = 0.2f)).fillMaxWidth(0.85f)
                     ) {
                         languages.forEach { lang ->
                             DropdownMenuItem(
@@ -748,52 +973,49 @@ private fun SettingsSheet(
                     }
                 }
                 Text(
-                    "Note: Switching to ${state.preferredLanguage} will force the AI to respond in that language.",
+                    "Note: AI will respond in ${state.preferredLanguage}.",
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color.DarkGray,
+                    color = Color.White.copy(alpha = 0.4f),
                     modifier = Modifier.padding(top = 4.dp, start = 4.dp)
                 )
             }
 
             Spacer(Modifier.height(24.dp))
 
-            Text("Creativity (Temperature): ${"%.1f".format(state.temperature)}", style = MaterialTheme.typography.bodyMedium)
+            Text("Creativity: ${"%.1f".format(state.temperature)}", style = MaterialTheme.typography.bodyMedium)
             Slider(
                 value = state.temperature,
                 onValueChange = onUpdateTemp,
                 valueRange = 0.1f..1.5f,
                 steps = 14,
-                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White)
+                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(alpha = 0.2f))
             )
 
             Spacer(Modifier.height(16.dp))
 
-            Text("Max Response Length: ${state.maxTokens} tokens", style = MaterialTheme.typography.bodyMedium)
-            Text("Controls how long the AI's answers can be.", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
+            Text("Max Response Length: ${state.maxTokens}", style = MaterialTheme.typography.bodyMedium)
             Slider(
                 value = state.maxTokens.toFloat(),
                 onValueChange = { onUpdateMaxTokens(it.toInt()) },
                 valueRange = 64f..2048f,
                 steps = 31,
-                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White)
+                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(alpha = 0.2f))
             )
 
             Spacer(Modifier.height(16.dp))
 
-            Text("Context Length: ${state.contextLength} tokens", style = MaterialTheme.typography.bodyMedium)
-            Text("How much the AI remembers in one conversation.", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
+            Text("Context Length: ${state.contextLength}", style = MaterialTheme.typography.bodyMedium)
             Slider(
                 value = state.contextLength.toFloat(),
                 onValueChange = { onUpdateContextLength(it.toInt()) },
                 valueRange = 512f..8192f,
                 steps = 15,
-                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White)
+                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(alpha = 0.2f))
             )
 
             Spacer(Modifier.height(24.dp))
 
-            Text("System Instructions", style = MaterialTheme.typography.labelMedium, color = Color.Gray)
-            Text("Overrides how the AI behaves.", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
+            Text("System Instructions", style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.5f))
             Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 value = systemPrompt,
@@ -804,8 +1026,8 @@ private fun SettingsSheet(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Color(0xFF4285F4),
-                    unfocusedBorderColor = Color(0xFF333333),
+                    focusedBorderColor = Color.White,
+                    unfocusedBorderColor = Color.White.copy(alpha = 0.2f),
                     focusedTextColor = Color.White,
                     unfocusedTextColor = Color.White
                 )
@@ -820,9 +1042,9 @@ private fun SettingsSheet(
 private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
     Surface(
         modifier = Modifier.padding(8.dp),
-        color = Color(0xFF1A1A1A),
-        shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(1.dp, Color(0xFF333333))
+        color = Color(0xFF171B22),
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, Color(0xFF2A313C))
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -841,13 +1063,14 @@ private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
             Column(Modifier.weight(1f)) {
                 Text(attachment.fileName,
                     style = MaterialTheme.typography.bodySmall, 
-                    color = Color.White,
+                    color = Color(0xFFF5F7FA),
                     maxLines = 1)
                 Text(FileProcessor.formatSize(attachment.fileSizeBytes),
-                    style = MaterialTheme.typography.labelSmall)
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF8F9BA8))
             }
             IconButton(onClick = onRemove) {
-                Icon(Icons.Default.Cancel, "Remove")
+                Icon(Icons.Default.Cancel, "Remove", tint = Color(0xFFB6C0CC))
             }
         }
     }
@@ -856,6 +1079,7 @@ private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
 @Composable
 private fun MessageBubble(
     msg: ChatMessage,
+    state: ChatUiState,
     onEdit: (Long, String) -> Unit
 ) {
     if (msg.role == Role.SYSTEM) {
@@ -863,18 +1087,12 @@ private fun MessageBubble(
             Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 8.dp),
             contentAlignment = Alignment.Center
         ) {
-            Surface(
-                color = Color(0xFF111111),
-                shape = RoundedCornerShape(4.dp),
-                border = BorderStroke(1.dp, Color(0xFF222222))
-            ) {
-                Text(msg.content.uppercase(),
-                    style     = MaterialTheme.typography.labelSmall,
-                    modifier  = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                    textAlign = TextAlign.Center,
-                    color     = Color.Gray,
-                    letterSpacing = 1.sp)
-            }
+            Text(msg.content.uppercase(),
+                style     = MaterialTheme.typography.labelSmall,
+                modifier  = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                textAlign = TextAlign.Center,
+                color     = Color.White.copy(alpha = 0.5f),
+                letterSpacing = 1.sp)
         }
         return
     }
@@ -884,189 +1102,172 @@ private fun MessageBubble(
     var isEditing by remember { mutableStateOf(false) }
     var editValue by remember { mutableStateOf(msg.content) }
 
-    Row(
-        modifier            = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
     ) {
-        if (!isUser) {
-            Box(
-                Modifier
-                    .size(32.dp)
-                    .padding(top = 4.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                EigenIcon(modifier = Modifier.size(28.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(bottom = 4.dp)
+        ) {
+            if (!isUser) {
+                NomadIcon(modifier = Modifier.size(20.dp), color = Color.White)
+                Spacer(Modifier.width(8.dp))
             }
-            Spacer(Modifier.width(12.dp))
+            Text(
+                text = if (isUser) "You" else "Nomad",
+                style = MaterialTheme.typography.labelMedium,
+                color = Color.White.copy(alpha = 0.7f),
+                fontWeight = FontWeight.Bold
+            )
         }
 
-        Column(
-            modifier = Modifier.weight(1f, fill = false),
-            horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = if (isUser) Color.White.copy(alpha = 0.1f) else Color.Transparent,
+            modifier = Modifier.widthIn(max = 340.dp)
         ) {
-            msg.attachment?.let { att ->
-                if (att.type == AttachmentType.IMAGE && att.thumbnailBase64 != null) {
-                    val bytes = Base64.decode(att.thumbnailBase64, Base64.DEFAULT)
-                    val bmp   = try { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) } catch(_: Exception) { null }
-                    if (bmp != null) {
-                        Image(
-                            bitmap            = bmp.asImageBitmap(),
-                            contentDescription = "Attached image",
-                            modifier          = Modifier
-                                .widthIn(max = 260.dp)
-                                .border(1.dp, Color(0xFF222222), RoundedCornerShape(4.dp))
-                                .padding(2.dp)
-                                .clip(RoundedCornerShape(2.dp))
-                                .padding(bottom = 12.dp),
-                            contentScale      = ContentScale.FillWidth
-                        )
-                    }
-                }
-            }
-
-            Surface(
-                shape = if (isUser) RoundedCornerShape(16.dp) else RoundedCornerShape(0.dp),
-                color = if (isUser && isEditing) Color(0xFF1A1A1A) else Color.Transparent,
-                border = null,
-                modifier = Modifier.widthIn(max = 320.dp)
-            ) {
-                Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                    if (!isUser && msg.thought != null) {
-                        var expanded by remember { mutableStateOf(false) }
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 12.dp)
-                                .background(Color(0xFF0F0F0F), RoundedCornerShape(4.dp))
-                                .border(1.dp, Color(0xFF1A1A1A), RoundedCornerShape(4.dp))
-                                .clickable { expanded = !expanded }
-                                .padding(12.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    Icons.Default.Psychology, 
-                                    null, 
-                                    tint = Color.White, 
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    "THOUGHT PROCESS", 
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Icon(
-                                    if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                    null,
-                                    tint = Color.DarkGray,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                            if (expanded) {
-                                Spacer(Modifier.height(8.dp))
-                                Text(
-                                    text = msg.thought,
-                                    color = Color.Gray,
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        lineHeight = 18.sp,
-                                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
-                                    )
-                                )
-                            }
+            Column(Modifier.padding(horizontal = if (isUser) 16.dp else 0.dp, vertical = if (isUser) 12.dp else 0.dp)) {
+                if (!isUser && msg.searchResults != null) {
+                    var expanded by remember { mutableStateOf(false) }
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                            .clickable { expanded = !expanded }
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Language,
+                                null,
+                                tint = Color.White.copy(alpha = 0.5f),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "WEB SEARCH RESULTS",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White.copy(alpha = 0.5f),
+                                letterSpacing = 1.sp
+                            )
+                        }
+                        if (expanded) {
+                            Text(
+                                text = msg.searchResults,
+                                color = Color.White.copy(alpha = 0.4f),
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(top = 8.dp)
+                                    .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
+                                    .padding(8.dp)
+                            )
                         }
                     }
+                }
+
+                if (!isUser && msg.thought != null) {
+                    var expanded by remember { mutableStateOf(false) }
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                            .clickable { expanded = !expanded }
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Psychology,
+                                null,
+                                tint = Color.White.copy(alpha = 0.5f),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "THOUGHT PROCESS",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White.copy(alpha = 0.5f),
+                                letterSpacing = 1.sp
+                            )
+                        }
+                        if (expanded) {
+                            Text(
+                                text = msg.thought,
+                                color = Color.White.copy(alpha = 0.4f),
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(top = 8.dp)
+                            )
+                        }
+                    }
+                }
 
                     if (msg.isStreaming && msg.content == "...") {
-                        BouncingDots()
+                        Box(modifier = Modifier.padding(top = 8.dp)) {
+                            Column {
+                                if (state.isSearchingWeb && msg.role == Role.ASSISTANT) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
+                                        Icon(Icons.Default.Language, null, tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Searching web...", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f))
+                                    }
+                                }
+                                BouncingDots()
+                            }
+                        }
                     } else if (!isUser && msg.content.contains("```")) {
-                        val parts = msg.content.split("```")
-                        parts.forEachIndexed { index, part ->
-                            if (index % 2 == 0) {
-                                if (part.isNotBlank()) {
-                                    Text(
-                                        text = part.trim(),
-                                        color = Color(0xFFDDDDDD),
-                                        style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 26.sp)
-                                    )
-                                }
-                            } else {
-                                CodeBlock(part)
+                    // Optimized splitting for Gemini-like code block rendering
+                    val blocks = msg.content.split("```")
+                    blocks.forEachIndexed { index, part ->
+                        if (index % 2 == 1) {
+                            // This is inside a code block
+                            val lines = part.split("\n")
+                            val lang = if (lines.firstOrNull()?.contains(Regex("^[a-zA-Z]+$")) == true) lines.first() else ""
+                            val code = if (lang.isNotEmpty()) part.substringAfter("\n") else part
+                            CodeBlock(code.trim(), lang)
+                        } else {
+                            // This is normal text
+                            if (part.isNotBlank()) {
+                                Text(
+                                    text = part.trim(),
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 26.sp),
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
                             }
                         }
-                    } else {
-                        Text(
-                            text       = msg.content,
-                            color      = if (isUser) Color.White else Color(0xFFDDDDDD),
-                            style      = MaterialTheme.typography.bodyLarge.copy(
-                                lineHeight = 26.sp,
-                                letterSpacing = 0.1.sp
-                            ),
-                            fontFamily = if (msg.content.contains("```")) FontFamily.Monospace
-                            else FontFamily.SansSerif
-                        )
                     }
+                } else {
+                    Text(
+                        text = msg.content,
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 26.sp)
+                    )
+                }
 
-                    if (msg.isStreaming) {
-                        TerminalCursor()
-                    }
-
-                    if (isEditing) {
-                        OutlinedTextField(
-                            value = editValue,
-                            onValueChange = { editValue = it },
-                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White
-                            )
-                        )
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                            TextButton(onClick = { isEditing = false }) { Text("Cancel", color = Color.Gray) }
-                            TextButton(onClick = { 
-                                onEdit(msg.id, editValue)
-                                isEditing = false 
-                            }) { Text("SAVE", color = Color.White, fontWeight = FontWeight.Bold) }
-                        }
-                    } else {
-                        // --- Message Actions ---
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(top = 8.dp),
-                            horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            IconButton(onClick = { clipboard.setText(AnnotatedString(msg.content)) }, modifier = Modifier.size(24.dp)) {
-                                Icon(Icons.Default.ContentCopy, "Copy", tint = Color.DarkGray, modifier = Modifier.size(14.dp))
-                            }
-                            if (isUser) {
-                                Spacer(Modifier.width(8.dp))
-                                IconButton(onClick = { isEditing = true }, modifier = Modifier.size(24.dp)) {
-                                    Icon(Icons.Default.Edit, "Edit", tint = Color.DarkGray, modifier = Modifier.size(14.dp))
-                                }
-                            }
-                        }
-                    }
+                if (msg.isStreaming) {
+                    // Removed blinking green cursor for pure white theme
+                    TerminalCursor()
                 }
             }
         }
-        
-        if (isUser) {
-            Spacer(Modifier.width(16.dp))
-            Box(
-                Modifier.size(24.dp).padding(top = 4.dp).background(Color(0xFF333333), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.Person, null, modifier = Modifier.size(14.dp), tint = Color.LightGray)
+
+        Row(
+            modifier = Modifier.padding(top = 4.dp),
+            horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+        ) {
+            IconButton(onClick = { clipboard.setText(AnnotatedString(msg.content)) }, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Default.ContentCopy, null, tint = Color.White.copy(alpha = 0.3f), modifier = Modifier.size(16.dp))
+            }
+            if (isUser) {
+                IconButton(onClick = { isEditing = true }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Edit, null, tint = Color.White.copy(alpha = 0.3f), modifier = Modifier.size(16.dp))
+                }
             }
         }
     }
 }
 
 @Composable
-private fun CodeBlock(code: String) {
+private fun CodeBlock(code: String, language: String = "") {
     val clipboardManager = LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
 
@@ -1080,40 +1281,50 @@ private fun CodeBlock(code: String) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp)
-            .background(Color(0xFF0D0D0D), RoundedCornerShape(8.dp))
-            .border(1.dp, Color(0xFF1A1A1A), RoundedCornerShape(8.dp))
+            .padding(vertical = 12.dp)
+            .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(12.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(12.dp))
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF1A1A1A))
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                "TERMINAL", 
-                style = MaterialTheme.typography.labelSmall, 
-                color = Color.Gray,
+                language.uppercase().ifEmpty { "CODE" },
+                style = MaterialTheme.typography.labelMedium,
+                color = Color.White.copy(alpha = 0.5f),
                 fontWeight = FontWeight.Bold
             )
-            Text(
-                if (copied) "COPIED" else "COPY",
-                modifier = Modifier.clickable {
+            Row(
+                Modifier.clickable {
                     clipboardManager.setText(AnnotatedString(code.trim()))
                     copied = true
                 },
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.White,
-                fontWeight = FontWeight.Bold
-            )
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+                    null,
+                    tint = if (copied) Color.Green else Color.White.copy(alpha = 0.5f),
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    if (copied) "Copied" else "Copy",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (copied) Color.Green else Color.White.copy(alpha = 0.5f),
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
         
         Box(
             modifier = Modifier
                 .horizontalScroll(rememberScrollState())
-                .padding(16.dp)
+                .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
             Text(
                 text = code.trim(),
@@ -1136,54 +1347,84 @@ private fun ChatInputBar(
     onSend: () -> Unit,
     onStop: () -> Unit,
     onAttach: () -> Unit,
-    onVoiceInput: () -> Unit
+    onLocalSearch: () -> Unit,
+    onWebSearch: () -> Unit,
+    onVoiceInput: () -> Unit,
+    webSearchEnabled: Boolean = false
 ) {
+    var showMenu by remember { mutableStateOf(false) }
+
     Surface(
         color = Color.Black,
         tonalElevation = 0.dp
     ) {
         Row(
             modifier = Modifier
-                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .padding(horizontal = 16.dp, vertical = 16.dp)
                 .fillMaxWidth()
-                .background(Color(0xFF111111), RoundedCornerShape(28.dp))
-                .padding(horizontal = 4.dp, vertical = 4.dp),
+                .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(28.dp))
+                .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(28.dp))
+                .padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(
-                onClick = onVoiceInput,
-                modifier = Modifier.size(48.dp)
-            ) {
-                Icon(
-                    Icons.Default.Mic,
-                    "Voice Input",
-                    tint = Color.Gray
-                )
-            }
-
-            IconButton(
-                onClick = onAttach,
-                modifier = Modifier.size(48.dp)
-            ) {
-                Icon(
-                    Icons.Default.Add,
-                    "Attach",
-                    tint = if (hasAttachment) Color.White else Color.Gray
-                )
+            Box {
+                IconButton(onClick = { showMenu = true }) {
+                    Icon(Icons.Default.Add, null, tint = Color.White)
+                }
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false },
+                    modifier = Modifier.background(Color.Black).border(1.dp, Color.White.copy(alpha = 0.1f))
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Upload File", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.AttachFile, null, tint = Color.White) },
+                        onClick = {
+                            showMenu = false
+                            onAttach()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Find Local", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.Search, null, tint = Color.White) },
+                        onClick = {
+                            showMenu = false
+                            onLocalSearch()
+                        }
+                    )
+                    if (webSearchEnabled) {
+                        DropdownMenuItem(
+                            text = { Text("Web Search", color = Color.White) },
+                            leadingIcon = { Icon(Icons.Default.Language, null, tint = Color.White) },
+                            onClick = {
+                                showMenu = false
+                                onWebSearch()
+                            }
+                        )
+                    }
+                }
             }
 
             BasicTextField(
                 value = text,
                 onValueChange = onTextChange,
+                enabled = true,
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = 4.dp),
-                textStyle = LocalTextStyle.current.copy(color = Color.White, fontSize = 16.sp),
+                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                textStyle = LocalTextStyle.current.copy(
+                    color = Color.White,
+                    fontSize = 16.sp
+                ),
                 cursorBrush = SolidColor(Color.White),
                 decorationBox = { innerTextField ->
                     Box(contentAlignment = Alignment.CenterStart) {
                         if (text.isEmpty()) {
-                            Text("Ask Eigen...", color = Color.DarkGray, fontSize = 16.sp)
+                            Text(
+                                "Ask Nomad anything...",
+                                color = Color.White.copy(alpha = 0.4f),
+                                fontSize = 16.sp
+                            )
                         }
                         innerTextField()
                     }
@@ -1191,31 +1432,37 @@ private fun ChatInputBar(
             )
 
             if (isGenerating) {
+                // Stop button: visible while model is busy. Clicking this stops generation.
                 IconButton(
                     onClick = onStop,
                     modifier = Modifier
                         .size(40.dp)
                         .background(Color.White, CircleShape)
                 ) {
-                    Icon(Icons.Default.Stop, "Stop", tint = Color.Black, modifier = Modifier.size(20.dp))
+                    Icon(
+                        Icons.Default.Stop,
+                        null,
+                        tint = Color.Black,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
-            } else {
+            } else if (text.isNotBlank() || hasAttachment) {
                 IconButton(
                     onClick = onSend,
-                    enabled = text.isNotBlank() || hasAttachment,
                     modifier = Modifier
                         .size(40.dp)
-                        .background(
-                            if (text.isNotBlank() || hasAttachment) Color.White else Color.Transparent,
-                            CircleShape
-                        )
+                        .background(Color.White, CircleShape)
                 ) {
                     Icon(
                         Icons.Default.ArrowUpward,
-                        "Send",
-                        tint = if (text.isNotBlank() || hasAttachment) Color.Black else Color.DarkGray,
+                        null,
+                        tint = Color.Black,
                         modifier = Modifier.size(20.dp)
                     )
+                }
+            } else {
+                IconButton(onClick = onVoiceInput) {
+                    Icon(Icons.Default.Mic, null, tint = Color.White)
                 }
             }
         }
@@ -1231,6 +1478,9 @@ private fun FirstLaunchModelSelection(
     onDelete: (ModelInfo) -> Unit,
     onDismiss: () -> Unit,
     totalRamGb: Double,
+    physicalRamGb: Double,
+    availableStorageGb: Double,
+    recommendedModelId: String?,
     isModelDownloaded: (ModelInfo) -> Boolean
 ) {
     Box(
@@ -1247,23 +1497,42 @@ private fun FirstLaunchModelSelection(
                 .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            EigenIcon(Modifier.size(48.dp))
+            NomadIcon(Modifier.size(48.dp))
             Spacer(Modifier.height(16.dp))
             Text(
-                "NEURAL HUB",
+                "NOMAD SETUP",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Black,
                 color = Color.White,
                 letterSpacing = 2.sp
             )
             Text(
-                "Configure your local inference engine",
+                "Pick the best local model for this device",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.Gray,
                 textAlign = TextAlign.Center
             )
             
             Spacer(Modifier.height(32.dp))
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xFF11151B),
+                shape = RoundedCornerShape(18.dp),
+                border = BorderStroke(1.dp, Color(0xFF242C38))
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Device budget", color = Color.White, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Effective memory budget ${"%.1f".format(totalRamGb)} GB • physical RAM ${"%.1f".format(physicalRamGb)} GB • free storage ${"%.1f".format(availableStorageGb)} GB",
+                        color = Color(0xFFB6C0CC),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
 
             models.forEach { model ->
                 val isSafe = model.ramRequirementGb <= totalRamGb * 0.9
@@ -1279,9 +1548,29 @@ private fun FirstLaunchModelSelection(
                     Column(Modifier.padding(16.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
-                                Text(model.name.uppercase(), fontWeight = FontWeight.Black, color = if (isSafe) Color.White else Color.Gray)
-                                Text("${model.paramCount} • ${model.ramRequirementGb}GB RAM REQ", 
-                                    style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(model.name.uppercase(), fontWeight = FontWeight.Black, color = if (isSafe) Color.White else Color.Gray)
+                                    if (model.id == recommendedModelId) {
+                                        Spacer(Modifier.width(8.dp))
+                                        Surface(
+                                            color = Color(0xFF173525),
+                                            shape = RoundedCornerShape(999.dp)
+                                        ) {
+                                            Text(
+                                                "BEST",
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = Color(0xFF86E0B5),
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+                                Text(
+                                    "${model.paramCount} • ${model.ramRequirementGb} GB RAM target • ${model.sizeLabel}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.Gray
+                                )
                             }
                             
                             if (isDownloaded) {
@@ -1314,7 +1603,7 @@ private fun FirstLaunchModelSelection(
                         }
 
                         if (!isSafe && !isDownloaded) {
-                            Text("DEVICE MAY REQUIRE MORE RAM", style = MaterialTheme.typography.labelSmall, 
+                            Text("THIS MODEL MAY FEEL HEAVY ON THIS DEVICE", style = MaterialTheme.typography.labelSmall,
                                 color = Color.DarkGray, modifier = Modifier.padding(top = 4.dp))
                         }
                     }
@@ -1329,7 +1618,7 @@ private fun FirstLaunchModelSelection(
                 colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("ENTER EIGEN", fontWeight = FontWeight.Black)
+                Text("ENTER NOMAD", fontWeight = FontWeight.Black)
             }
         }
     }
@@ -1357,11 +1646,11 @@ fun TerminalCursor() {
             .padding(start = 2.dp)
             .size(width = 8.dp, height = 16.dp)
             .alpha(alpha)
-            .background(Color.White)
+            .background(Color(0xFF24A27B))
     )
 }
 @Composable
-fun EigenIcon(modifier: Modifier = Modifier, color: Color = Color.White) {
+fun NomadIcon(modifier: Modifier = Modifier, color: Color = Color.White) {
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         Canvas(modifier = Modifier.fillMaxSize()) {
             val w = size.width
@@ -1422,7 +1711,7 @@ fun BouncingDots() {
     }
 }
 @Composable
-private fun LoadingOverlay(progress: Float) {
+private fun LoadingOverlay(progress: Float, status: String) {
     Box(
         Modifier
             .fillMaxSize()
@@ -1438,7 +1727,14 @@ private fun LoadingOverlay(progress: Float) {
             )
             Spacer(Modifier.height(16.dp))
             Text(
-                "NEURAL ENGINE BOOTING... ${(progress * 100).toInt()}%", 
+                status,
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Preparing model... ${(progress * 100).toInt()}%",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.White,
                 letterSpacing = 1.sp,

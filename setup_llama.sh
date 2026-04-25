@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # setup_llama.sh  –  Clone llama.cpp into the Android project
-# Run this ONCE from the PocketLLM project root before opening in Android Studio
+# Run this ONCE from the Nomad project root before opening in Android Studio
 # ─────────────────────────────────────────────────────────────────────────────
 set -e
 

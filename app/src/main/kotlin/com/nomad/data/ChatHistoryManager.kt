@@ -1,4 +1,4 @@
-package com.eigen.data
+package com.nomad.data
 
 import android.content.Context
 import com.google.gson.Gson

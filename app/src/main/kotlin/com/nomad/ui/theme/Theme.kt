@@ -1,4 +1,4 @@
-package com.eigen.ui.theme
+package com.nomad.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
@@ -8,31 +8,31 @@ import androidx.compose.ui.graphics.Color
 private val DarkColors = darkColorScheme(
     primary        = Color.White,
     onPrimary      = Color.Black,
-    secondary      = Color(0xFF333333),
-    onSecondary    = Color.White,
+    secondary      = Color.White,
+    onSecondary    = Color.Black,
     background     = Color.Black,
     surface        = Color.Black,
-    surfaceVariant = Color(0xFF111111),
+    surfaceVariant = Color.Black,
     onBackground   = Color.White,
     onSurface      = Color.White,
-    outline        = Color(0xFF333333)
+    outline        = Color.White
 )
 
-private val LightColors = darkColorScheme( // Force dark even in "light" mode for the "Eigen" aesthetic
+private val LightColors = darkColorScheme(
     primary        = Color.White,
     onPrimary      = Color.Black,
-    secondary      = Color(0xFF333333),
-    onSecondary    = Color.White,
+    secondary      = Color.White,
+    onSecondary    = Color.Black,
     background     = Color.Black,
     surface        = Color.Black,
-    surfaceVariant = Color(0xFF111111),
+    surfaceVariant = Color.Black,
     onBackground   = Color.White,
     onSurface      = Color.White,
-    outline        = Color(0xFF333333)
+    outline        = Color.White
 )
 
 @Composable
-fun EigenTheme(
+fun NomadTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit
 ) {

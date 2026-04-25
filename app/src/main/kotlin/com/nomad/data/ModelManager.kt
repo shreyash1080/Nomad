@@ -1,7 +1,9 @@
-package com.eigen.data
+package com.nomad.data
 
 import android.app.ActivityManager
 import android.content.Context
+import android.os.Environment
+import android.os.StatFs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -47,24 +49,56 @@ class ModelManager(private val context: Context) {
         val thresholdGb: Double,
         val lowMemory: Boolean,
         val memoryClassMb: Int,
-        val largeMemoryClassMb: Int
+        val largeMemoryClassMb: Int,
+        val availableStorageGb: Double,
+        val virtualHeadroomGb: Double,
+        val effectiveRamBudgetGb: Double
     )
 
     fun getMemoryStats(): MemoryStats {
         val actManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val memInfo = ActivityManager.MemoryInfo()
         actManager.getMemoryInfo(memInfo)
+        val statFs = StatFs(Environment.getDataDirectory().absolutePath)
+        val availableStorageGb = statFs.availableBytes.toDouble() / (1024 * 1024 * 1024)
+        val virtualHeadroomGb = minOf(
+            availableStorageGb * 0.18,
+            memInfo.totalMem.toDouble() / (1024 * 1024 * 1024) * 0.5,
+            4.0
+        )
+        val physicalRamGb = memInfo.totalMem.toDouble() / (1024 * 1024 * 1024)
         
         return MemoryStats(
-            physicalRamGb = memInfo.totalMem.toDouble() / (1024 * 1024 * 1024),
+            physicalRamGb = physicalRamGb,
             thresholdGb = memInfo.threshold.toDouble() / (1024 * 1024 * 1024),
             lowMemory = memInfo.lowMemory,
             memoryClassMb = actManager.memoryClass,
-            largeMemoryClassMb = actManager.largeMemoryClass
+            largeMemoryClassMb = actManager.largeMemoryClass,
+            availableStorageGb = availableStorageGb,
+            virtualHeadroomGb = virtualHeadroomGb,
+            effectiveRamBudgetGb = physicalRamGb + virtualHeadroomGb
         )
     }
 
-    fun getTotalRAM(): Double = getMemoryStats().physicalRamGb
+    fun getTotalRAM(): Double = getMemoryStats().effectiveRamBudgetGb
+
+    fun recommendBestModel(models: List<ModelInfo> = getAvailableModels()): ModelInfo {
+        val stats = getMemoryStats()
+        // More aggressive budget: Use 90% of physical RAM as a safe baseline, 
+        // but allow up to 110% of physical RAM if the model is marked as recommended.
+        val physicalBudget = stats.physicalRamGb
+        
+        return models
+            .filter { model ->
+                val requirement = model.ramRequirementGb
+                // If it's a 3B+ model and we have at least 6GB RAM, it's usually fine
+                if (model.paramCountValue >= 3.0 && physicalBudget >= 6.0) true
+                // Otherwise, stay within a slightly more generous budget
+                else requirement <= physicalBudget * 1.2
+            }
+            .maxByOrNull { it.paramCountValue }
+            ?: models.minBy { it.ramRequirementGb }
+    }
 
     /** Returns the File for a model if it is already downloaded */
     fun getLocalFile(model: ModelInfo): File =

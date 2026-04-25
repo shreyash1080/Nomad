@@ -1,4 +1,4 @@
-package com.eigen.data
+package com.nomad.data
 
 import android.net.Uri
 
@@ -10,7 +10,8 @@ data class ChatMessage(
     val content: String,
     val thought: String?       = null,
     val isStreaming: Boolean   = false,
-    val attachment: Attachment? = null
+    val attachment: Attachment? = null,
+    val searchResults: String?  = null
 )
 
 data class ModelInfo(

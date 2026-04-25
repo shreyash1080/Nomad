@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Storage for Android 12 and below -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <!-- Granular media permissions for Android 13+ -->
@@ -16,10 +17,10 @@
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="Eigen"
+        android:label="Nomad"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.PocketLLM"
+        android:theme="@style/Theme.Nomad"
         android:largeHeap="true"
         android:hardwareAccelerated="true">
 
