@@ -1,17 +1,17 @@
 # Nomad 🛰️
 
-Nomad is a high-performance, **100% offline** LLM client for Android. Inspired by the simplicity of Gemini, it allows you to run state-of-the-art language models (like Llama 3.2) locally on your device with advanced file analysis capabilities.
+Nomad is a high-performance, **100% offline** LLM client for Android.It allows you to run state-of-the-art language models locally on your device with advanced file analysis capabilities.
 
 ## ✨ Features
 
-- **Pure Black UI**: Minimalist, high-contrast design optimized for OLED screens.
 - **Offline Intelligence**: No internet required. Your data never leaves your device.
 - **Advanced File Analysis**:
   - **Images**: OCR powered by Google ML Kit.
   - **PDFs**: Full text extraction using `PdfRenderer` and OCR for scanned documents.
   - **Office (DOCX/XLSX)**: Direct XML parsing for fast, library-free document reading.
 - **Dynamic Engine**: Automatically switches between Llama 3 and ChatML prompt formats.
-- **RAM Guard**: Intelligent memory monitoring to prevent system OOM (Out-Of-Memory) crashes.
+- **Web Search**: Empowers the local model with real-time web context for improved response accuracy.
+- **RAM Guard**: Intelligent memory monitoring to prevent system OOM.
 
 ## 🛠️ Architecture
 
