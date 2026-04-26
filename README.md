@@ -13,7 +13,7 @@
 
 Experience true local intelligence. No sign-ups, no subscriptions, and no tracking.
 
-[<img src="https://img.shields.io/badge/Download-Latest%20APK-black?style=for-the-badge&logo=android&logoColor=white" height="40">](https://github.com/shreyash1080/Nomad/releases/latest)
+[<img src="https://img.shields.io/badge/Download-Latest%20APK-black?style=for-the-badge&logo=android&logoColor=white" height="40">](https://github.com/shreyash1080/Nomad/releases/download/Nomad-apk/Nomad.apk)
 
 > **Note:** A physical device with at least **6GB RAM** is recommended for optimal performance with 3B+ parameter models.
 
