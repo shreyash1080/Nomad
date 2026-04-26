@@ -1,0 +1,12 @@
+torch>=2.0.0
+transformers>=4.35.0
+safetensors>=0.4.0
+huggingface_hub>=0.20.0
+psutil>=5.9.0
+sentencepiece>=0.1.99
+
+[fast]
+accelerate>=0.24.0
+
+[quantization]
+bitsandbytes>=0.41.0

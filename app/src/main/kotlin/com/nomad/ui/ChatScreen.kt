@@ -233,7 +233,10 @@ fun ChatScreen(viewModel: ChatViewModel) {
                             MessageBubble(
                                 msg = msg,
                                 state = state,
-                                onEdit = { id, text -> viewModel.editMessage(id, text) }
+                                onEdit = { id, text -> viewModel.editMessage(id, text) },
+                                onReport = { message -> 
+                                    viewModel.addSysMsg("Nomad is an offline interface. To report harmful content, please visit the respective model provider's website (Meta, Google, or Microsoft) and follow their safety reporting guidelines.")
+                                }
                             )
                         }
                     }
@@ -252,7 +255,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
                         physicalRamGb = modelsState.physicalRamGb,
                         availableStorageGb = modelsState.availableStorageGb,
                         recommendedModelId = modelsState.recommendedModelId,
-                        isModelDownloaded = { viewModel.modelManager.getLocalFile(it).exists() }
+                        isModelDownloaded = { viewModel.modelManager.isDownloaded(it) }
                     )
                 }
                 
@@ -262,7 +265,10 @@ fun ChatScreen(viewModel: ChatViewModel) {
                     val modelsState by viewModel.modelsState.collectAsState()
                     SettingsSheet(
                         state = state,
-                        onDismiss = { showSettings = false },
+                        onDismiss = { 
+                            viewModel.applySettingsAndReloadIfNeeded()
+                            showSettings = false 
+                        },
                         onUpdateName = { viewModel.updateUserName(it) },
                         onUpdateSystemPrompt = { viewModel.updateSystemPrompt(it) },
                         onUpdateUseGpu = { viewModel.updateUseGpu(it) },
@@ -278,15 +284,20 @@ fun ChatScreen(viewModel: ChatViewModel) {
                         onUpdateLanguage = { viewModel.setLanguage(it) },
                         onSelectModel = { viewModel.loadModel(it) },
                         onDownloadMore = { 
-                            viewModel.resetFirstLaunch()
                             showSettings = false
+                            viewModel.resetFirstLaunch()
                         },
-                        isModelDownloaded = { viewModel.modelManager.getLocalFile(it).exists() },
+                        isModelDownloaded = { viewModel.modelManager.isDownloaded(it) },
                         models = modelsState.models,
                         recommendedModelId = modelsState.recommendedModelId,
                         memoryBudgetGb = modelsState.totalDeviceRamGb,
                         physicalRamGb = modelsState.physicalRamGb
                     )
+                    
+                    // Track baseline context length when opening
+                    LaunchedEffect(Unit) {
+                        viewModel.onSettingsOpened()
+                    }
                 }
 
                 state.error?.let { err ->
@@ -665,27 +676,27 @@ private fun SettingsSheet(
             // --- MODEL SELECTION ---
             Text("Active Model", style = MaterialTheme.typography.labelLarge, color = Color.White)
             Spacer(Modifier.height(12.dp))
-            recommendedModelId?.let { bestId ->
-                models.firstOrNull { it.id == bestId }?.let { bestModel ->
-                    Surface(
-                        color = Color.Black,
-                        shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, Color.White),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(Modifier.padding(14.dp)) {
-                            Text("BEST MATCH FOR THIS DEVICE", color = Color.White, fontWeight = FontWeight.Black, fontSize = 10.sp)
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                "${bestModel.name} (${bestModel.paramCount})",
-                                color = Color.White,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        }
+            
+            state.loadedModel?.let { loadedModel ->
+                Surface(
+                    color = Color.Black,
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, Color.White),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("CURRENTLY LOADED", color = Color.White, fontWeight = FontWeight.Black, fontSize = 10.sp)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "${loadedModel.name} (${loadedModel.paramCount})",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
                     }
-                    Spacer(Modifier.height(12.dp))
                 }
+                Spacer(Modifier.height(12.dp))
             }
+            
             Box {
                 OutlinedButton(
                     onClick = { showModelMenu = true },
@@ -697,7 +708,7 @@ private fun SettingsSheet(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.ModelTraining, null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(12.dp))
-                        Text(state.loadedModel?.name?.uppercase() ?: "SELECT MODEL", fontWeight = FontWeight.Bold)
+                        Text("SWITCH MODEL", fontWeight = FontWeight.Bold)
                         Spacer(Modifier.weight(1f))
                         Icon(Icons.Default.ArrowDropDown, null)
                     }
@@ -717,11 +728,16 @@ private fun SettingsSheet(
                     }
 
                     downloadedModels.forEach { model ->
+                        val isCurrent = state.loadedModel?.id == model.id
                         DropdownMenuItem(
                             text = { 
                                 Column {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(model.name, color = Color.White)
+                                        Text(model.name, color = if (isCurrent) Color.White else Color.Gray)
+                                        if (isCurrent) {
+                                            Spacer(Modifier.width(8.dp))
+                                            Box(Modifier.size(6.dp).background(Color.White, CircleShape))
+                                        }
                                         if (model.id == recommendedModelId) {
                                             Spacer(Modifier.width(8.dp))
                                             Surface(
@@ -738,11 +754,11 @@ private fun SettingsSheet(
                                             }
                                         }
                                     }
-                                    Text("${model.paramCount} • ${model.filename}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                                    Text("${model.paramCount} • ${model.filename}", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
                                 }
                             },
                             onClick = {
-                                onSelectModel(model)
+                                if (!isCurrent) onSelectModel(model)
                                 showModelMenu = false
                             }
                         )
@@ -1080,7 +1096,8 @@ private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
 private fun MessageBubble(
     msg: ChatMessage,
     state: ChatUiState,
-    onEdit: (Long, String) -> Unit
+    onEdit: (Long, String) -> Unit,
+    onReport: (ChatMessage) -> Unit
 ) {
     if (msg.role == Role.SYSTEM) {
         Box(
@@ -1201,19 +1218,19 @@ private fun MessageBubble(
                 }
 
                     if (msg.isStreaming && msg.content == "...") {
-                        Box(modifier = Modifier.padding(vertical = 12.dp)) {
-                            Column {
-                                if (state.isSearchingWeb && msg.role == Role.ASSISTANT) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
-                                        Icon(Icons.Default.Language, null, tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("Searching web...", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f))
-                                    }
+                    Box(modifier = Modifier.padding(vertical = 12.dp)) {
+                        Column {
+                            if (state.isSearchingWeb && msg.role == Role.ASSISTANT) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
+                                    Icon(Icons.Default.Language, null, tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Searching web...", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f))
                                 }
-                                BouncingDots()
                             }
+                            BouncingDots()
                         }
-                    } else if (!isUser && msg.content.contains("```")) {
+                    }
+                } else if (!isUser && msg.content.contains("```")) {
                     // Optimized splitting for Gemini-like code block rendering
                     val blocks = msg.content.split("```")
                     blocks.forEachIndexed { index, part ->
@@ -1262,6 +1279,10 @@ private fun MessageBubble(
             if (isUser) {
                 IconButton(onClick = { isEditing = true }, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.Edit, null, tint = Color.White.copy(alpha = 0.3f), modifier = Modifier.size(16.dp))
+                }
+            } else {
+                IconButton(onClick = { onReport(msg) }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Flag, null, tint = Color.White.copy(alpha = 0.3f), modifier = Modifier.size(16.dp))
                 }
             }
         }
@@ -1386,14 +1407,6 @@ private fun ChatInputBar(
                             onAttach()
                         }
                     )
-                    DropdownMenuItem(
-                        text = { Text("Find Local", color = Color.White) },
-                        leadingIcon = { Icon(Icons.Default.Search, null, tint = Color.White) },
-                        onClick = {
-                            showMenu = false
-                            onLocalSearch()
-                        }
-                    )
                     if (webSearchEnabled) {
                         DropdownMenuItem(
                             text = { Text("Web Search", color = Color.White) },
@@ -1420,15 +1433,33 @@ private fun ChatInputBar(
                 ),
                 cursorBrush = SolidColor(Color.White),
                 decorationBox = { innerTextField ->
-                    Box(contentAlignment = Alignment.CenterStart) {
-                        if (text.isEmpty()) {
-                            Text(
-                                "Ask Nomad anything...",
-                                color = Color.White.copy(alpha = 0.4f),
-                                fontSize = 16.sp
-                            )
+                    Column {
+                        if (text.startsWith("search ") || text.startsWith("lookup ") || text.startsWith("google ")) {
+                            Surface(
+                                color = Color.White.copy(alpha = 0.1f),
+                                shape = RoundedCornerShape(4.dp),
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            ) {
+                                Text(
+                                    "WEB SEARCH",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
-                        innerTextField()
+                        Box(contentAlignment = Alignment.CenterStart) {
+                            if (text.isEmpty()) {
+                                Text(
+                                    "Ask Nomad anything...",
+                                    color = Color.White.copy(alpha = 0.4f),
+                                    fontSize = 16.sp
+                                )
+                            }
+                            innerTextField()
+                        }
                     }
                 }
             )
@@ -1540,9 +1571,13 @@ private fun FirstLaunchModelSelection(
                 val isSafe = model.ramRequirementGb <= totalRamGb * 0.9
                 val isDownloaded = isModelDownloaded(model)
                 val downloadState = downloadStates[model.id]
+                val isDisabled = model.downloadUrl == "DISABLED"
 
                 Surface(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp)
+                        .alpha(if (isDisabled) 0.5f else 1f),
                     color = Color(0xFF0A0A0A),
                     shape = RoundedCornerShape(0.dp),
                     border = BorderStroke(1.dp, if (isSafe) Color(0xFF222222) else Color(0xFF333333))
@@ -1551,7 +1586,11 @@ private fun FirstLaunchModelSelection(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(model.name.uppercase(), fontWeight = FontWeight.Black, color = if (isSafe) Color.White else Color.Gray)
+                                    Text(
+                                        model.name.uppercase(), 
+                                        fontWeight = FontWeight.Black, 
+                                        color = if (isSafe && !isDisabled) Color.White else Color.Gray
+                                    )
                                     if (model.id == recommendedModelId) {
                                         Spacer(Modifier.width(8.dp))
                                         Surface(
@@ -1588,8 +1627,15 @@ private fun FirstLaunchModelSelection(
                                     Icon(Icons.Default.Close, null, tint = Color.White, modifier = Modifier.size(16.dp))
                                 }
                             } else {
-                                IconButton(onClick = { onSelect(model) }) {
-                                    Icon(Icons.Default.Download, null, tint = if (isSafe) Color.White else Color.Gray)
+                                IconButton(
+                                    onClick = { if (!isDisabled) onSelect(model) },
+                                    enabled = !isDisabled
+                                ) {
+                                    Icon(
+                                        Icons.Default.Download, 
+                                        null, 
+                                        tint = if (isSafe && !isDisabled) Color.White else Color.Gray
+                                    )
                                 }
                             }
                         }
@@ -1604,7 +1650,10 @@ private fun FirstLaunchModelSelection(
                             )
                         }
 
-                        if (!isSafe && !isDownloaded) {
+                        if (isDisabled) {
+                            Text("COMING SOON - UNDER OPTIMIZATION", style = MaterialTheme.typography.labelSmall,
+                                color = Color.Gray, modifier = Modifier.padding(top = 4.dp))
+                        } else if (!isSafe && !isDownloaded) {
                             Text("THIS MODEL MAY FEEL HEAVY ON THIS DEVICE", style = MaterialTheme.typography.labelSmall,
                                 color = Color.DarkGray, modifier = Modifier.padding(top = 4.dp))
                         }

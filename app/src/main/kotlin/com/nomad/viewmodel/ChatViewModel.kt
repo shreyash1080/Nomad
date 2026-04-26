@@ -9,12 +9,13 @@ import android.content.pm.PackageManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.core.content.ContextCompat
+import androidx.work.*
 import com.nomad.data.*
 import com.nomad.engine.LlamaEngine
+import com.nomad.mobilellm.AirLLMEngine
+import com.nomad.mobilellm.MobileAirLLMClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.ArrayDeque
@@ -58,6 +59,7 @@ data class ChatUiState(
     val chatHistory: List<ChatSession> = emptyList(),
     val currentSessionId: String? = null,
     val isFirstLaunch: Boolean = true,
+    val hasAcceptedTerms: Boolean = false,
     val localFileHelperEnabled: Boolean = false,
     val webSearchEnabled: Boolean = true,
     val isSearchingWeb: Boolean = false,
@@ -97,10 +99,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _models = MutableStateFlow(ModelsUiState())
     val modelsState: StateFlow<ModelsUiState> = _models
 
+    private var airLLMEngine: AirLLMEngine? = null
     private var genJob: Job? = null
     private val history = ArrayDeque<Pair<String, String>>()
     private val downloadJobs = mutableMapOf<String, Job>()
     private val modelLoadMutex = Mutex()
+
+    private var initialContextLength: Int = 4096
 
     init {
         loadChatHistory()
@@ -108,6 +113,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         val prefs = application.getSharedPreferences("nomad_prefs", Context.MODE_PRIVATE)
         val isFirstLaunch = prefs.getBoolean("is_first_launch", true)
+        val savedContext = prefs.getInt("context_length", 4096)
+        initialContextLength = savedContext
+
         _chat.update {
             it.copy(
                 userName = prefs.getString("user_name", "Joe") ?: "Joe",
@@ -141,6 +149,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 preferredLanguage = prefs.getString("language", "English") ?: "English",
                 localFileHelperEnabled = prefs.getBoolean("local_file_helper", false),
                 webSearchEnabled = prefs.getBoolean("web_search_enabled", true),
+                hasAcceptedTerms = prefs.getBoolean("has_accepted_terms", false),
                 contextLength = prefs.getInt("context_length", 4096)
             )
         }
@@ -214,7 +223,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val isSwitchingModel =
                     currentLoadedModel?.id != null && currentLoadedModel.id != model.id
 
-                if (stats.effectiveRamBudgetGb * 1.05 < model.ramRequirementGb) {
+                val isAirLLM = model.id.endsWith("-air")
+
+                if (!isAirLLM && stats.effectiveRamBudgetGb * 1.05 < model.ramRequirementGb) {
                     _chat.update {
                         it.copy(
                             error = "Warning: ${model.name} needs about ${model.ramRequired}, " +
@@ -237,36 +248,61 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     stopGenerationAndWait()
 
                     if (currentLoadedModel != null) {
-                        _chat.update {
-                            it.copy(
-                                loadProgress = 0.14f,
-                                loadStatus = if (isSwitchingModel) "Closing ${currentLoadedModel.name}..."
-                                else "Refreshing ${model.name}..."
-                            )
+                        if (currentLoadedModel.id.endsWith("-air")) {
+                            airLLMEngine?.unload()
+                            airLLMEngine = null
+                        } else {
+                            LlamaEngine.unloadModel()
                         }
-                        LlamaEngine.unloadModel()
                     }
 
-                    val file = modelManager.getLocalFile(model)
-                    val loadResult = LlamaEngine.load(
-                        file,
-                        useGpu = tunedState.useGpu,
-                        contextSize = tunedState.contextLength,
-                        threads = generationThreadsFor(tunedState.performanceMode),
-                        systemPrompt = tunedState.systemPrompt
-                    ) { progress ->
-                        _chat.update {
-                            it.copy(
-                                loadProgress = 0.2f + (progress * 0.75f),
-                                loadStatus = "Optimizing ${model.name} for this device..."
+                    if (isAirLLM) {
+                        _chat.update { it.copy(loadStatus = "Connecting to MobileAirLLM...") }
+                        
+                        val engine = AirLLMEngine(
+                            context = getApplication(),
+                            modelId = model.downloadUrl,
+                            compression = model.quantization
+                        )
+                        airLLMEngine = engine
+                        
+                        // Attempt to load the model through the engine
+                        val initResult = engine.initialize()
+                        if (initResult is AirLLMEngine.InitResult.Success) {
+                            val file = modelManager.getLocalFile(model)
+                            val client = MobileAirLLMClient()
+                            val loadSuccess = client.loadModel(
+                                modelPath = file.absolutePath,
+                                compression = model.quantization
                             )
+                            if (!loadSuccess) throw RuntimeException("AirLLM failed to load shards.")
+                        } else if (initResult is AirLLMEngine.InitResult.ServerNotRunning) {
+                            throw RuntimeException("MobileAirLLM server not running. Please start it in Termux.")
+                        } else if (initResult is AirLLMEngine.InitResult.LoadFailed) {
+                            throw RuntimeException("AirLLM load failed: ${(initResult as AirLLMEngine.InitResult.LoadFailed).reason}")
                         }
+                    } else {
+                        val file = modelManager.getLocalFile(model)
+                        val loadResult = LlamaEngine.load(
+                            file,
+                            useGpu = tunedState.useGpu,
+                            contextSize = tunedState.contextLength,
+                            threads = generationThreadsFor(tunedState.performanceMode),
+                            systemPrompt = tunedState.systemPrompt
+                        ) { progress ->
+                            _chat.update {
+                                it.copy(
+                                    loadProgress = 0.2f + (progress * 0.75f),
+                                    loadStatus = "Optimizing ${model.name} for this device..."
+                                )
+                            }
+                        }
+                        loadResult.getOrThrow()
+                        LlamaEngine.setThreads(
+                            generationThreadsFor(tunedState.performanceMode),
+                            promptThreadsFor(tunedState.performanceMode)
+                        )
                     }
-                    loadResult.getOrThrow()
-                    LlamaEngine.setThreads(
-                        generationThreadsFor(tunedState.performanceMode),
-                        promptThreadsFor(tunedState.performanceMode)
-                    )
 
                     _chat.update {
                         it.copy(
@@ -282,11 +318,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         .getSharedPreferences("nomad_prefs", Context.MODE_PRIVATE)
                         .edit().putString("last_model_id", model.id).apply()
 
-                    addSysMsg(
-                        "Nomad tuned ${model.name} for this device: " +
-                                "${tunedState.responseMode.name.lowercase()} mode, " +
-                                "${tunedState.maxTokens} max tokens, ${tunedState.contextLength} context."
-                    )
+                    addSysMsg("Nomad tuned ${model.name} for this device.")
 
                     delay(120)
                     _chat.update { it.copy(loadProgress = 0f, loadStatus = "Loading model...") }
@@ -321,16 +353,49 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun downloadModel(model: ModelInfo) {
-        val job = viewModelScope.launch {
-            modelManager.downloadModel(model).collect { state ->
-                _models.update { it.copy(downloadStates = it.downloadStates + (model.id to state)) }
-                if (state is DownloadState.Success) {
-                    _models.update { it.copy(models = modelManager.getAvailableModels()) }
-                    loadModel(model)
+        val workManager = WorkManager.getInstance(getApplication())
+        val data = workDataOf("model_id" to model.id)
+        
+        val downloadRequest = OneTimeWorkRequestBuilder<DownloadWorker>()
+            .setInputData(data)
+            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+            .addTag("download_${model.id}")
+            .build()
+            
+        workManager.enqueueUniqueWork(
+            "download_${model.id}",
+            ExistingWorkPolicy.REPLACE,
+            downloadRequest
+        )
+
+        // Observe progress from WorkManager
+        viewModelScope.launch {
+            workManager.getWorkInfoByIdFlow(downloadRequest.id).collect { workInfo ->
+                if (workInfo != null) {
+                    val progress = workInfo.progress.getInt("progress", 0)
+                    val error = workInfo.outputData.getString("error")
+                    
+                    _models.update { state ->
+                        val newStates = state.downloadStates.toMutableMap()
+                        when (workInfo.state) {
+                            WorkInfo.State.RUNNING -> {
+                                newStates[model.id] = DownloadState.Progress(progress, 0, model.fileSizeBytes)
+                            }
+                            WorkInfo.State.SUCCEEDED -> {
+                                newStates[model.id] = DownloadState.Success
+                                // Reload models to show READY
+                                _models.update { it.copy(models = modelManager.getAvailableModels()) }
+                            }
+                            WorkInfo.State.FAILED -> {
+                                newStates[model.id] = DownloadState.Error(error ?: "Unknown error")
+                            }
+                            else -> {}
+                        }
+                        state.copy(downloadStates = newStates)
+                    }
                 }
             }
         }
-        downloadJobs[model.id] = job
     }
 
     fun cancelDownload(modelId: String) {
@@ -405,6 +470,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             .edit().putBoolean("is_first_launch", false).apply()
     }
 
+    fun acceptTerms() {
+        _chat.update { it.copy(hasAcceptedTerms = true) }
+        getApplication<Application>()
+            .getSharedPreferences("nomad_prefs", Context.MODE_PRIVATE)
+            .edit().putBoolean("has_accepted_terms", true).apply()
+    }
+
     // ── Message sending — FIXED routing order ───────────────────────────────
     /**
      * FIXED routing logic:
@@ -433,13 +505,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         else currentAttachment
 
         val displayText = if (attachmentToUse != null) {
-            if (userText.isNotBlank()) "$userText\n📎 ${attachmentToUse.fileName}"
-            else "Analyze this file: ${attachmentToUse.fileName}"
-        } else userText
+            if (userText.isNotBlank()) userText
+            else "📎 ${attachmentToUse.fileName}"
+        } else {
+            // Remove "search " or "lookup " from the displayed message
+            if (WebSearchHelper.isWebSearchIntent(userText)) {
+                WebSearchHelper.cleanQuery(userText)
+            } else userText
+        }
 
         // ── Intent routing (only for plain text, no attachment) ────────────
         if (attachmentToUse == null) {
-
             // PRIORITY 1 — Web Search (checked FIRST to avoid "search" being stolen by file helper)
             if (_chat.value.webSearchEnabled && WebSearchHelper.isWebSearchIntent(userText)) {
                 handleWebSearchRequest(userText)
@@ -460,7 +536,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        if (!LlamaEngine.isModelLoaded()) {
+        if (!LlamaEngine.isModelLoaded() && airLLMEngine?.isReady != true) {
             addSysMsg("⚠️ No model loaded — go to Models tab.")
             return
         }
@@ -522,8 +598,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 boostCpuPerf()
                 val liveState = _chat.value
+                val isAirLLM = liveState.loadedModel?.id?.endsWith("-air") == true
                 val perfProfile = buildPerformanceProfile(liveState, userText, attachmentToUse)
-                LlamaEngine.setThreads(perfProfile.generationThreads, perfProfile.promptThreads)
+                
+                if (!isAirLLM) {
+                    LlamaEngine.setThreads(perfProfile.generationThreads, perfProfile.promptThreads)
+                }
 
                 val prompt = if (isInternalPrompt && internalPrompt != null) {
                     LlamaEngine.buildChatPrompt(
@@ -552,12 +632,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 var firstTokenTs = 0L
                 var lastUiUpdateTs = 0L
 
-                LlamaEngine.generateFlow(
-                    prompt = prompt,
-                    maxTokens = perfProfile.maxTokens,
-                    temperature = perfProfile.temperature,
-                    topP = 0.95f
-                ).collect { token ->
+                val flow = if (isAirLLM) {
+                    airLLMEngine?.generateFlow(
+                        prompt = prompt,
+                        maxNewTokens = perfProfile.maxTokens,
+                        temperature = perfProfile.temperature
+                    ) ?: emptyFlow()
+                } else {
+                    LlamaEngine.generateFlow(
+                        prompt = prompt,
+                        maxTokens = perfProfile.maxTokens,
+                        temperature = perfProfile.temperature,
+                        topP = 0.95f
+                    )
+                }
+
+                flow.collect { token ->
                     if (tokenCount == 0) {
                         firstTokenTs = System.currentTimeMillis()
                         _chat.update { it.copy(firstTokenLatencyMs = firstTokenTs - startTs) }
@@ -602,8 +692,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val totalTime = System.currentTimeMillis() - startTs
                 val tps = if (totalTime > 0) (tokenCount / (totalTime / 1000f)) else 0f
 
+                // Fast update: no typing effect for web results or when explicitly requested
                 updateAssistantMessage(
-                    content = if (finalText.isBlank()) "No response generated." else finalText,
+                    content = if (sb.toString().isBlank()) "No response generated." else sb.toString(),
                     thought = thoughtSb.toString().ifBlank { null },
                     isStreaming = false,
                     tokensPerSec = tps
@@ -652,11 +743,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopGeneration() {
         LlamaEngine.stopGeneration()
+        airLLMEngine?.let {
+             // MobileAirLLMClient doesn't have a stop method exposed in AirLLMEngine yet, 
+             // but we can cancel the job.
+        }
         genJob?.cancel()
     }
 
     private suspend fun stopGenerationAndWait() {
         LlamaEngine.stopGeneration()
+        // airLLMEngine stop would go here if available
         genJob?.cancelAndJoin()
         genJob = null
         _chat.update { it.copy(isGenerating = false) }
@@ -749,10 +845,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updatePerformanceMode(mode: PerformanceMode) {
+        val current = _chat.value
         _chat.update { it.copy(performanceMode = mode) }
         getApplication<Application>()
             .getSharedPreferences("nomad_prefs", Context.MODE_PRIVATE)
             .edit().putString("perf_mode", mode.name).apply()
+        
+        // Dynamic update without reload if possible
         if (LlamaEngine.isModelLoaded()) {
             LlamaEngine.setThreads(generationThreadsFor(mode), promptThreadsFor(mode))
         }
@@ -773,11 +872,33 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateContextLength(length: Int) {
+        if (_chat.value.contextLength == length) return
+        
         _chat.update { it.copy(contextLength = length) }
         getApplication<Application>()
             .getSharedPreferences("nomad_prefs", Context.MODE_PRIVATE)
             .edit().putInt("context_length", length).apply()
-        reloadLoadedModelIfNeeded()
+    }
+
+    /**
+     * Call this when the user finishes adjusting settings (e.g. onDismiss of SettingsSheet)
+     * to avoid reloading multiple times during slider movement.
+     */
+    fun applySettingsAndReloadIfNeeded() {
+        val currentContext = _chat.value.contextLength
+        
+        // Only reload if context length actually changed from when settings were opened
+        if (LlamaEngine.isModelLoaded() && currentContext != initialContextLength) {
+             reloadLoadedModelIfNeeded()
+             initialContextLength = currentContext
+        }
+    }
+
+    /**
+     * Call this when opening the settings menu to track the baseline context length
+     */
+    fun onSettingsOpened() {
+        initialContextLength = _chat.value.contextLength
     }
 
     fun updateResponseMode(mode: ResponseMode) {
