@@ -31,7 +31,7 @@
 - **Office (DOCX/XLSX)**: Direct XML parsing for fast, library-free reading.
 
 ### 🌐 Real-time Awareness
-- **Web Search**: Supplements the offline AI with real-time web context via **DuckDuckGo** to provide accurate and up-to-date answers.
+- **Web Search**: Supplements the offline AI with real-time web context to provide accurate and up-to-date answers.
 
 ---
 
