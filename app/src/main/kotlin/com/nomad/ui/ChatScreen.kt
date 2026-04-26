@@ -233,7 +233,10 @@ fun ChatScreen(viewModel: ChatViewModel) {
                             MessageBubble(
                                 msg = msg,
                                 state = state,
-                                onEdit = { id, text -> viewModel.editMessage(id, text) }
+                                onEdit = { id, text -> viewModel.editMessage(id, text) },
+                                onReport = { message -> 
+                                    viewModel.addSysMsg("Nomad is an offline interface. To report harmful content, please visit the respective model provider's website (Meta, Google, or Microsoft) and follow their safety reporting guidelines.")
+                                }
                             )
                         }
                     }
@@ -281,8 +284,8 @@ fun ChatScreen(viewModel: ChatViewModel) {
                         onUpdateLanguage = { viewModel.setLanguage(it) },
                         onSelectModel = { viewModel.loadModel(it) },
                         onDownloadMore = { 
-                            viewModel.resetFirstLaunch()
                             showSettings = false
+                            viewModel.resetFirstLaunch()
                         },
                         isModelDownloaded = { viewModel.modelManager.isDownloaded(it) },
                         models = modelsState.models,
@@ -673,27 +676,27 @@ private fun SettingsSheet(
             // --- MODEL SELECTION ---
             Text("Active Model", style = MaterialTheme.typography.labelLarge, color = Color.White)
             Spacer(Modifier.height(12.dp))
-            recommendedModelId?.let { bestId ->
-                models.firstOrNull { it.id == bestId }?.let { bestModel ->
-                    Surface(
-                        color = Color.Black,
-                        shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, Color.White),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(Modifier.padding(14.dp)) {
-                            Text("BEST MATCH FOR THIS DEVICE", color = Color.White, fontWeight = FontWeight.Black, fontSize = 10.sp)
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                "${bestModel.name} (${bestModel.paramCount})",
-                                color = Color.White,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        }
+            
+            state.loadedModel?.let { loadedModel ->
+                Surface(
+                    color = Color.Black,
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, Color.White),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("CURRENTLY LOADED", color = Color.White, fontWeight = FontWeight.Black, fontSize = 10.sp)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "${loadedModel.name} (${loadedModel.paramCount})",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
                     }
-                    Spacer(Modifier.height(12.dp))
                 }
+                Spacer(Modifier.height(12.dp))
             }
+            
             Box {
                 OutlinedButton(
                     onClick = { showModelMenu = true },
@@ -705,7 +708,7 @@ private fun SettingsSheet(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.ModelTraining, null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(12.dp))
-                        Text(state.loadedModel?.name?.uppercase() ?: "SELECT MODEL", fontWeight = FontWeight.Bold)
+                        Text("SWITCH MODEL", fontWeight = FontWeight.Bold)
                         Spacer(Modifier.weight(1f))
                         Icon(Icons.Default.ArrowDropDown, null)
                     }
@@ -725,11 +728,16 @@ private fun SettingsSheet(
                     }
 
                     downloadedModels.forEach { model ->
+                        val isCurrent = state.loadedModel?.id == model.id
                         DropdownMenuItem(
                             text = { 
                                 Column {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(model.name, color = Color.White)
+                                        Text(model.name, color = if (isCurrent) Color.White else Color.Gray)
+                                        if (isCurrent) {
+                                            Spacer(Modifier.width(8.dp))
+                                            Box(Modifier.size(6.dp).background(Color.White, CircleShape))
+                                        }
                                         if (model.id == recommendedModelId) {
                                             Spacer(Modifier.width(8.dp))
                                             Surface(
@@ -746,11 +754,11 @@ private fun SettingsSheet(
                                             }
                                         }
                                     }
-                                    Text("${model.paramCount} • ${model.filename}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                                    Text("${model.paramCount} • ${model.filename}", style = MaterialTheme.typography.labelSmall, color = Color.DarkGray)
                                 }
                             },
                             onClick = {
-                                onSelectModel(model)
+                                if (!isCurrent) onSelectModel(model)
                                 showModelMenu = false
                             }
                         )
@@ -1088,7 +1096,8 @@ private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
 private fun MessageBubble(
     msg: ChatMessage,
     state: ChatUiState,
-    onEdit: (Long, String) -> Unit
+    onEdit: (Long, String) -> Unit,
+    onReport: (ChatMessage) -> Unit
 ) {
     if (msg.role == Role.SYSTEM) {
         Box(
@@ -1270,6 +1279,10 @@ private fun MessageBubble(
             if (isUser) {
                 IconButton(onClick = { isEditing = true }, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.Edit, null, tint = Color.White.copy(alpha = 0.3f), modifier = Modifier.size(16.dp))
+                }
+            } else {
+                IconButton(onClick = { onReport(msg) }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Flag, null, tint = Color.White.copy(alpha = 0.3f), modifier = Modifier.size(16.dp))
                 }
             }
         }

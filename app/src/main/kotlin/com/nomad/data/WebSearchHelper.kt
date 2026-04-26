@@ -195,7 +195,7 @@ object WebSearchHelper {
     private fun tryHtmlScrape(query: String): String? {
         return try {
             val encodedQuery = URLEncoder.encode(query, "UTF-8")
-            val url = "https://html.duckduckgo.com/html/?q=$encodedQuery&kl=us-en"
+            val url = "https://html.google.com/html/?q=$encodedQuery&kl=us-en"
             val request = Request.Builder()
                 .url(url)
                 .header(

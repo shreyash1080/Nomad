@@ -138,20 +138,21 @@ class ModelManager(private val context: Context) {
     fun downloadModel(model: ModelInfo): Flow<DownloadState> = flow {
         emit(DownloadState.Connecting)
 
-        val dest     = getLocalFile(model)
+        val dest = getLocalFile(model)
         
         // Handle AirLLM models (sharded directories)
         if (model.id.endsWith("-air")) {
             if (!dest.exists()) dest.mkdirs()
             
             try {
-                // 1. Download index.json
+                // 1. Download index.json (always refresh to be safe)
                 val indexUrl = model.downloadUrl
                 val repoBase = indexUrl.substringBefore("/resolve/main/")
                 
                 val indexReq = Request.Builder().url(indexUrl).build()
                 val indexResp = http.newCall(indexReq).execute()
-                val indexBody = indexResp.body?.string() ?: throw Exception("Failed to download index.json")
+                if (!indexResp.isSuccessful) throw Exception("Failed to download index.json: ${indexResp.code}")
+                val indexBody = indexResp.body?.string() ?: throw Exception("Empty index.json")
                 
                 val indexFile = File(dest, "model.safetensors.index.json")
                 indexFile.writeText(indexBody)
@@ -163,23 +164,39 @@ class ModelManager(private val context: Context) {
                     ?.mapNotNull { it.substringAfterLast(":").trim().trim('"') }
                     ?.distinct() ?: throw Exception("Could not parse weight_map in index.json")
 
-                var totalDownloadedBytes = 0L
                 val totalExpectedBytes = model.fileSizeBytes
                 var lastEmitTime = 0L
 
+                // Pre-calculate already downloaded bytes for accurate starting progress
+                var totalDownloadedBytes = 0L
+                shardNames.forEach { sName ->
+                    val sFile = File(dest, sName)
+                    val tFile = File(dest, "$sName.part")
+                    if (sFile.exists()) totalDownloadedBytes += sFile.length()
+                    else if (tFile.exists()) totalDownloadedBytes += tFile.length()
+                }
+
                 shardNames.forEach { shardName ->
-                    val shardUrl = "$repoBase/resolve/main/$shardName"
                     val shardFile = File(dest, shardName)
                     val tempShard = File(dest, "$shardName.part")
                     
-                    if (shardFile.exists()) {
-                        totalDownloadedBytes += shardFile.length()
-                    } else {
-                        val resumeFrom = if (tempShard.exists()) tempShard.length() else 0L
-                        val shardReq = Request.Builder().url(shardUrl)
+                    if (!shardFile.exists()) {
+                        val shardUrl = "$repoBase/resolve/main/$shardName"
+                        var resumeFrom = if (tempShard.exists()) tempShard.length() else 0L
+                        
+                        var shardReq = Request.Builder().url(shardUrl)
                         if (resumeFrom > 0) shardReq.header("Range", "bytes=$resumeFrom-")
                         
-                        val shardResp = http.newCall(shardReq.build()).execute()
+                        var shardResp = http.newCall(shardReq.build()).execute()
+                        
+                        // Handle potential 416 Range Not Satisfiable (e.g. if file changed or local is corrupted/longer)
+                        if (shardResp.code == 416) {
+                            tempShard.delete()
+                            resumeFrom = 0L
+                            shardReq = Request.Builder().url(shardUrl)
+                            shardResp = http.newCall(shardReq.build()).execute()
+                        }
+
                         if (!shardResp.isSuccessful) throw Exception("Shard $shardName download failed: ${shardResp.code}")
                         
                         shardResp.body?.byteStream()?.use { input ->
@@ -208,6 +225,7 @@ class ModelManager(private val context: Context) {
                 
                 // Finalize AirLLM model
                 File(dest, ".complete").createNewFile()
+                emit(DownloadState.Progress(100, totalExpectedBytes, totalExpectedBytes))
                 emit(DownloadState.Success)
                 return@flow
             } catch (e: Exception) {
@@ -216,32 +234,39 @@ class ModelManager(private val context: Context) {
             }
         }
 
+        // --- GGUF Single File Download ---
         val tempFile = File(modelsDir, "${model.filename}.part")
-
-        val resumeFrom = if (tempFile.exists()) tempFile.length() else 0L
+        var resumeFrom = if (tempFile.exists()) tempFile.length() else 0L
 
         try {
-            val reqBuilder = Request.Builder().url(model.downloadUrl)
-            if (resumeFrom > 0) {
-                reqBuilder.header("Range", "bytes=$resumeFrom-")
+            var reqBuilder = Request.Builder().url(model.downloadUrl)
+            if (resumeFrom > 0) reqBuilder.header("Range", "bytes=$resumeFrom-")
+
+            var response = http.newCall(reqBuilder.build()).execute()
+            
+            if (response.code == 416) {
+                tempFile.delete()
+                resumeFrom = 0L
+                reqBuilder = Request.Builder().url(model.downloadUrl)
+                response = http.newCall(reqBuilder.build()).execute()
             }
 
-            val response = http.newCall(reqBuilder.build()).execute()
             if (!response.isSuccessful) {
                 emit(DownloadState.Error("HTTP ${response.code}: ${response.message}"))
                 return@flow
             }
 
-            val body        = response.body ?: run {
+            val body = response.body ?: run {
                 emit(DownloadState.Error("Empty response body"))
                 return@flow
             }
-            val contentLen  = body.contentLength()
-            val totalBytes  = if (contentLen < 0) model.fileSizeBytes else resumeFrom + contentLen
+            
+            val contentLen = body.contentLength()
+            val totalBytes = if (contentLen < 0) model.fileSizeBytes else resumeFrom + contentLen
 
             body.byteStream().use { input ->
                 java.io.FileOutputStream(tempFile, resumeFrom > 0).use { output ->
-                    val buf       = ByteArray(65_536)
+                    val buf = ByteArray(65536)
                     var downloaded = resumeFrom
                     var lastEmitTime = 0L
 
@@ -252,25 +277,23 @@ class ModelManager(private val context: Context) {
                         downloaded += n
 
                         val currentTime = System.currentTimeMillis()
-                        if (currentTime - lastEmitTime > 500) { // Limit updates to every 500ms
-                            val pct = if (totalBytes > 0)
-                                ((downloaded * 100) / totalBytes).toInt()
-                            else 0
-                            
+                        if (currentTime - lastEmitTime > 500) {
+                            val pct = if (totalBytes > 0) ((downloaded * 100) / totalBytes).toInt() else 0
                             lastEmitTime = currentTime
-                            emit(DownloadState.Progress(pct, downloaded, totalBytes))
+                            emit(DownloadState.Progress(pct.coerceIn(0, 100), downloaded, totalBytes))
                         }
                     }
                     output.flush()
                 }
             }
 
+            // Integrity check: file size must match expected
             if (tempFile.length() >= totalBytes && totalBytes > 0) {
                 tempFile.renameTo(dest)
                 emit(DownloadState.Progress(100, totalBytes, totalBytes))
                 emit(DownloadState.Success)
             } else {
-                emit(DownloadState.Error("Download interrupted: file incomplete"))
+                emit(DownloadState.Error("Download incomplete: expected $totalBytes bytes, got ${tempFile.length()}"))
             }
 
         } catch (e: Exception) {

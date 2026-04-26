@@ -10,25 +10,59 @@ Endpoints:
   POST /reset        – clear KV cache
   GET  /status       – RAM & engine status
   GET  /health       – heartbeat
+  GET  /progress     – loading progress (0-100)
 
-Android app connects to http://localhost:8765
+Fixes vs original:
+  - ThreadingHTTPServer: handles /health and /status during model load
+  - Load lock fixed: was releasing before thread finished
+  - /progress endpoint for Android polling
+  - Graceful shutdown on SIGTERM (Termux kill)
 """
 
 import json
 import time
+import signal
 import logging
 import threading
 import traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_PORT = 8765
-_engine = None          # global MobileAirLLM AutoModel instance
-_loading_lock = threading.Lock()
-_status = {"state": "idle", "model": None, "error": None, "progress": 0}
+
+_engine = None
+_load_thread: Optional[threading.Thread] = None
+_load_lock = threading.Lock()   # only one load at a time
+_status = {
+    "state": "idle",       # idle | loading | ready | error
+    "model": None,
+    "error": None,
+    "progress": 0,         # 0-100 during loading
+    "progress_msg": "",
+}
+_status_lock = threading.Lock()
+
+
+def _set_status(**kwargs):
+    with _status_lock:
+        _status.update(kwargs)
+
+
+def _get_status() -> dict:
+    with _status_lock:
+        return dict(_status)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Threaded HTTP server — critical: allows /health during long model loads
+# ──────────────────────────────────────────────────────────────────────────────
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -39,13 +73,19 @@ class LLMHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         logger.debug(f"[HTTP] {self.address_string()} {format % args}")
 
-    # ── Routing ──────────────────────────────────────────────────────────────
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/health":
             self._json(200, {"status": "ok", "time": time.time()})
         elif path == "/status":
-            self._json(200, _status)
+            self._json(200, _get_status())
+        elif path == "/progress":
+            s = _get_status()
+            self._json(200, {
+                "progress": s["progress"],
+                "state": s["state"],
+                "msg": s.get("progress_msg", ""),
+            })
         elif path == "/stream":
             self._handle_stream()
         else:
@@ -69,26 +109,35 @@ class LLMHandler(BaseHTTPRequestHandler):
         self._send_cors()
         self.end_headers()
 
-    # ── Handlers ─────────────────────────────────────────────────────────────
+    # ── Load ─────────────────────────────────────────────────────────────────
     def _handle_load(self, body: dict):
-        global _engine, _status
+        global _engine, _load_thread
+
         model_path = body.get("model_path")
         if not model_path:
             self._json(400, {"error": "model_path required"})
             return
 
-        if _loading_lock.locked():
+        # Reject if another load is already running
+        if not _load_lock.acquire(blocking=False):
             self._json(409, {"error": "model already loading"})
+            return
+
+        # If same model is already ready, skip reload
+        s = _get_status()
+        if s["state"] == "ready" and s["model"] == model_path:
+            _load_lock.release()
+            self._json(200, {"status": "already loaded", "model": model_path})
             return
 
         def _load():
             global _engine
-            _status["state"] = "loading"
-            _status["model"] = model_path
-            _status["error"] = None
-            _status["progress"] = 0
             try:
+                _set_status(state="loading", model=model_path, error=None,
+                            progress=0, progress_msg="Initializing…")
                 from .auto_model import AutoModel
+
+                _set_status(progress=5, progress_msg="Checking shards…")
                 _engine = AutoModel.from_pretrained(
                     model_path=model_path,
                     shard_dir=body.get("shard_dir"),
@@ -100,20 +149,21 @@ class LLMHandler(BaseHTTPRequestHandler):
                     delete_original=body.get("delete_original", False),
                     hf_token=body.get("hf_token"),
                 )
-                _status["state"] = "ready"
-                _status["progress"] = 100
+                _set_status(state="ready", progress=100, progress_msg="Ready")
                 logger.info(f"[Server] Model loaded: {model_path}")
             except Exception as e:
-                _status["state"] = "error"
-                _status["error"] = str(e)
+                _set_status(state="error", error=str(e), progress=0,
+                            progress_msg=f"Error: {e}")
                 logger.error(f"[Server] Load error: {e}\n{traceback.format_exc()}")
+            finally:
+                _load_lock.release()
 
-        with _loading_lock:
-            t = threading.Thread(target=_load, daemon=True)
-            t.start()
+        _load_thread = threading.Thread(target=_load, daemon=True, name="ModelLoader")
+        _load_thread.start()
 
         self._json(202, {"status": "loading started", "model": model_path})
 
+    # ── Generate (blocking) ───────────────────────────────────────────────────
     def _handle_generate(self, body: dict):
         global _engine
         if _engine is None:
@@ -124,9 +174,13 @@ class LLMHandler(BaseHTTPRequestHandler):
         try:
             result = _engine.generate(prompt, **kwargs)
             self._json(200, {"text": result, "prompt": prompt})
+        except MemoryError as e:
+            self._json(507, {"error": f"OOM: {e}"})
         except Exception as e:
+            logger.error(f"[Server] Generate error: {e}\n{traceback.format_exc()}")
             self._json(500, {"error": str(e)})
 
+    # ── Stream (SSE) ──────────────────────────────────────────────────────────
     def _handle_stream(self):
         global _engine
         if _engine is None:
@@ -144,7 +198,6 @@ class LLMHandler(BaseHTTPRequestHandler):
         }
         kwargs = _gen_kwargs(body)
 
-        # SSE headers
         self.send_response(200)
         self._send_cors()
         self.send_header("Content-Type", "text/event-stream")
@@ -162,9 +215,14 @@ class LLMHandler(BaseHTTPRequestHandler):
         except BrokenPipeError:
             pass
         except Exception as e:
-            err = json.dumps({"error": str(e)})
-            self.wfile.write(f"data: {err}\n\n".encode())
+            try:
+                err = json.dumps({"error": str(e)})
+                self.wfile.write(f"data: {err}\n\n".encode())
+                self.wfile.flush()
+            except Exception:
+                pass
 
+    # ── Reset / Unload ────────────────────────────────────────────────────────
     def _handle_reset(self):
         global _engine
         if _engine:
@@ -172,13 +230,14 @@ class LLMHandler(BaseHTTPRequestHandler):
         self._json(200, {"status": "cache cleared"})
 
     def _handle_unload(self):
-        global _engine, _status
+        global _engine
         _engine = None
-        _status = {"state": "idle", "model": None, "error": None, "progress": 0}
-        import gc; gc.collect()
+        _set_status(state="idle", model=None, error=None, progress=0, progress_msg="")
+        import gc
+        gc.collect()
         self._json(200, {"status": "unloaded"})
 
-    # ── Util ─────────────────────────────────────────────────────────────────
+    # ── Util ──────────────────────────────────────────────────────────────────
     def _json(self, code: int, data: dict):
         body = json.dumps(data).encode()
         self.send_response(code)
@@ -216,12 +275,20 @@ def _gen_kwargs(body: dict) -> dict:
 # Start server
 # ──────────────────────────────────────────────────────────────────────────────
 def run_server(host: str = "127.0.0.1", port: int = DEFAULT_PORT):
-    """Start the blocking HTTP server."""
-    server = HTTPServer((host, port), LLMHandler)
+    server = ThreadedHTTPServer((host, port), LLMHandler)
+
+    # Graceful shutdown on SIGTERM (Termux kill / Android process death)
+    def _shutdown(signum, frame):
+        logger.info("[Server] SIGTERM received — shutting down.")
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+
     logger.info(f"[MobileAirLLM Server] Listening on http://{host}:{port}")
     print(f"\n🚀 MobileAirLLM Server running at http://{host}:{port}")
-    print("   Endpoints: /load  /generate  /stream  /reset  /status  /health")
+    print("   Endpoints: /load  /generate  /stream  /reset  /status  /progress  /health")
     print("   Press Ctrl+C to stop.\n")
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:

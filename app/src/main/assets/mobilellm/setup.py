@@ -4,7 +4,7 @@ setup(
     name="mobilellm",
     version="1.0.0",
     description="Run 30B+ LLMs on 8 GB RAM mobile devices via layer-sharding",
-    long_description=open("README.md").read(),
+    long_description="MobileAirLLM Server",
     long_description_content_type="text/markdown",
     author="MobileAirLLM",
     license="Apache-2.0",

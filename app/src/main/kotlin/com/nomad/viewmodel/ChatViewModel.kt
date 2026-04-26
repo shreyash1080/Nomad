@@ -59,6 +59,7 @@ data class ChatUiState(
     val chatHistory: List<ChatSession> = emptyList(),
     val currentSessionId: String? = null,
     val isFirstLaunch: Boolean = true,
+    val hasAcceptedTerms: Boolean = false,
     val localFileHelperEnabled: Boolean = false,
     val webSearchEnabled: Boolean = true,
     val isSearchingWeb: Boolean = false,
@@ -148,6 +149,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 preferredLanguage = prefs.getString("language", "English") ?: "English",
                 localFileHelperEnabled = prefs.getBoolean("local_file_helper", false),
                 webSearchEnabled = prefs.getBoolean("web_search_enabled", true),
+                hasAcceptedTerms = prefs.getBoolean("has_accepted_terms", false),
                 contextLength = prefs.getInt("context_length", 4096)
             )
         }
@@ -231,10 +233,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                 }
-                if(isAirLLM)
-                {
-
-                }
 
                 val tunedState = applyRecommendedSettingsForModel(model, stats)
                 _chat.update {
@@ -250,13 +248,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     stopGenerationAndWait()
 
                     if (currentLoadedModel != null) {
-                        _chat.update {
-                            it.copy(
-                                loadProgress = 0.14f,
-                                loadStatus = if (isSwitchingModel) "Closing ${currentLoadedModel.name}..."
-                                else "Refreshing ${model.name}..."
-                            )
-                        }
                         if (currentLoadedModel.id.endsWith("-air")) {
                             airLLMEngine?.unload()
                             airLLMEngine = null
@@ -274,16 +265,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             compression = model.quantization
                         )
                         airLLMEngine = engine
-                        when (val result = engine.initialize()) {
-                            is AirLLMEngine.InitResult.Success -> {
-                                // Success
-                            }
-                            is AirLLMEngine.InitResult.ServerNotRunning -> {
-                                throw RuntimeException("MobileAirLLM server not running in Termux. Please start it with ~/start_mobilellm.sh")
-                            }
-                            is AirLLMEngine.InitResult.LoadFailed -> {
-                                throw RuntimeException("AirLLM load failed: ${result.reason}")
-                            }
+                        
+                        // Attempt to load the model through the engine
+                        val initResult = engine.initialize()
+                        if (initResult is AirLLMEngine.InitResult.Success) {
+                            val file = modelManager.getLocalFile(model)
+                            val client = MobileAirLLMClient()
+                            val loadSuccess = client.loadModel(
+                                modelPath = file.absolutePath,
+                                compression = model.quantization
+                            )
+                            if (!loadSuccess) throw RuntimeException("AirLLM failed to load shards.")
+                        } else if (initResult is AirLLMEngine.InitResult.ServerNotRunning) {
+                            throw RuntimeException("MobileAirLLM server not running. Please start it in Termux.")
+                        } else if (initResult is AirLLMEngine.InitResult.LoadFailed) {
+                            throw RuntimeException("AirLLM load failed: ${(initResult as AirLLMEngine.InitResult.LoadFailed).reason}")
                         }
                     } else {
                         val file = modelManager.getLocalFile(model)
@@ -322,11 +318,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         .getSharedPreferences("nomad_prefs", Context.MODE_PRIVATE)
                         .edit().putString("last_model_id", model.id).apply()
 
-                    addSysMsg(
-                        "Nomad tuned ${model.name} for this device: " +
-                                "${tunedState.responseMode.name.lowercase()} mode, " +
-                                "${tunedState.maxTokens} max tokens, ${tunedState.contextLength} context."
-                    )
+                    addSysMsg("Nomad tuned ${model.name} for this device.")
 
                     delay(120)
                     _chat.update { it.copy(loadProgress = 0f, loadStatus = "Loading model...") }
@@ -478,6 +470,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             .edit().putBoolean("is_first_launch", false).apply()
     }
 
+    fun acceptTerms() {
+        _chat.update { it.copy(hasAcceptedTerms = true) }
+        getApplication<Application>()
+            .getSharedPreferences("nomad_prefs", Context.MODE_PRIVATE)
+            .edit().putBoolean("has_accepted_terms", true).apply()
+    }
+
     // ── Message sending — FIXED routing order ───────────────────────────────
     /**
      * FIXED routing logic:
@@ -517,7 +516,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         // ── Intent routing (only for plain text, no attachment) ────────────
         if (attachmentToUse == null) {
-
             // PRIORITY 1 — Web Search (checked FIRST to avoid "search" being stolen by file helper)
             if (_chat.value.webSearchEnabled && WebSearchHelper.isWebSearchIntent(userText)) {
                 handleWebSearchRequest(userText)

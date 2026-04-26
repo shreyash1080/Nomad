@@ -1,0 +1,33 @@
+Metadata-Version: 2.4
+Name: mobilellm
+Version: 1.0.0
+Summary: Run 30B+ LLMs on 8 GB RAM mobile devices via layer-sharding
+Author: MobileAirLLM
+License: Apache-2.0
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: torch>=2.0.0
+Requires-Dist: transformers>=4.35.0
+Requires-Dist: safetensors>=0.4.0
+Requires-Dist: huggingface_hub>=0.20.0
+Requires-Dist: psutil>=5.9.0
+Requires-Dist: sentencepiece>=0.1.99
+Provides-Extra: quantization
+Requires-Dist: bitsandbytes>=0.41.0; extra == "quantization"
+Provides-Extra: fast
+Requires-Dist: accelerate>=0.24.0; extra == "fast"
+Dynamic: author
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: license
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+MobileAirLLM Server
