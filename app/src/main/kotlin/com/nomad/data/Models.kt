@@ -109,6 +109,20 @@ object ModelCatalog {
             sizeLabel = "5.1 GB", ramRequired = "8 GB RAM",
             downloadUrl = "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q5_K_M.gguf",
             filename = "mistral-7b-q5.gguf", paramCount = "7B", quantization = "Q5_K_M"
+        ),
+        ModelInfo(
+            id = "gemma2-27b-air", name = "Gemma 2 27B (AirLLM) - Coming Soon",
+            description = "Google's 27B model via layer sharding. (Under Optimization)",
+            sizeLabel = "15 GB", ramRequired = "6 GB RAM",
+            downloadUrl = "DISABLED",
+            filename = "gemma2-27b-shards", paramCount = "27B", quantization = "4bit"
+        ),
+        ModelInfo(
+            id = "llama3-70b-air", name = "Llama 3 70B (AirLLM) - Coming Soon",
+            description = "Meta's 70B model. Massive intelligence via sharding. (Under Optimization)",
+            sizeLabel = "40 GB", ramRequired = "8 GB RAM",
+            downloadUrl = "DISABLED",
+            filename = "llama3-70b-shards", paramCount = "70B", quantization = "4bit"
         )
     )
 }

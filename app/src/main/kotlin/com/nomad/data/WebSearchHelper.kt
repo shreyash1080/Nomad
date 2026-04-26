@@ -69,21 +69,29 @@ object WebSearchHelper {
     suspend fun performSearch(query: String): String = withContext(Dispatchers.IO) {
         Log.d(TAG, "Searching for: $query")
         try {
-            // Level 1: Instant Answer API (great for facts, definitions, calculations)
+            // Level 1: Instant Answer API (great for facts, definitions, calculations, market data)
             val instantResult = tryInstantAnswerApi(query)
-            if (!instantResult.isNullOrBlank()) {
-                Log.d(TAG, "Got instant answer result")
-                return@withContext instantResult
-            }
 
-            // Level 2: HTML scraping (covers general web results)
+            // Level 2: HTML scraping (covers general web results, top 5)
             val htmlResult = tryHtmlScrape(query)
-            if (!htmlResult.isNullOrBlank()) {
-                Log.d(TAG, "Got HTML scrape result")
-                return@withContext htmlResult
+
+            if (instantResult.isNullOrBlank() && htmlResult.isNullOrBlank()) {
+                return@withContext "No clear results found for \"$query\". The query may be too specific or require real-time data."
             }
 
-            "No clear results found for \"$query\". The query may be too specific or require real-time data."
+            val sb = StringBuilder()
+
+            // Always include instant answer if available (contains specific data like Wikipedia, stock prices, etc.)
+            if (!instantResult.isNullOrBlank()) {
+                sb.append("### Instant Answer / Knowledge Card\n$instantResult\n\n")
+            }
+
+            // Include up to 5 web results for broader context
+            if (!htmlResult.isNullOrBlank()) {
+                sb.append("### Top Web Search Results\n$htmlResult")
+            }
+
+            sb.toString().trim()
         } catch (e: Exception) {
             Log.e(TAG, "Search error", e)
             "Web search failed: ${e.localizedMessage ?: "Network error. Check your internet connection."}"
@@ -217,35 +225,42 @@ object WebSearchHelper {
         val titles = mutableListOf<String>()
         val snippets = mutableListOf<String>()
 
-        // Extract result titles — <a class="result__a" href="...">Title</a>
+        // Extract result titles
         val titleRegex = Regex(
             """class=["']result__a["'][^>]*>\s*(.+?)\s*</a>""",
             setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
         )
-        titleRegex.findAll(html).take(4).forEach { match ->
+        titleRegex.findAll(html).take(5).forEach { match ->
             val title = match.groupValues[1].stripHtml().htmlDecode().trim()
-            if (title.isNotBlank() && title.length > 3) titles.add(title)
+            if (title.isNotBlank()) titles.add(title.take(80))
         }
 
-        // Extract result snippets — <a class="result__snippet" ...>Snippet</a>
+        // Extract result snippets
         val snippetRegex = Regex(
             """class=["']result__snippet["'][^>]*>(.+?)</a>""",
             setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
         )
-        snippetRegex.findAll(html).take(3).forEach { match ->
+        snippetRegex.findAll(html).take(5).forEach { match ->
             val snippet = match.groupValues[1].stripHtml().htmlDecode().trim()
-            if (snippet.isNotBlank() && snippet.length > 25) snippets.add(snippet)
+            if (snippet.isNotBlank() && snippet.length > 20) {
+                // Shorten significantly to speed up inference (max 150 chars)
+                val shortSnippet = if (snippet.length > 150) snippet.take(147) + "..." else snippet
+                snippets.add(shortSnippet)
+            }
         }
 
-        // Also try alternate snippet tag
+        // Fallback for snippets if the first regex misses
         if (snippets.isEmpty()) {
             val altSnippetRegex = Regex(
                 """class=["']result-snippet["'][^>]*>(.+?)</(?:td|div|span|a)>""",
                 setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
             )
-            altSnippetRegex.findAll(html).take(3).forEach { match ->
+            altSnippetRegex.findAll(html).take(5).forEach { match ->
                 val snippet = match.groupValues[1].stripHtml().htmlDecode().trim()
-                if (snippet.isNotBlank() && snippet.length > 25) snippets.add(snippet)
+                if (snippet.isNotBlank() && snippet.length > 20) {
+                    val shortSnippet = if (snippet.length > 150) snippet.take(147) + "..." else snippet
+                    snippets.add(shortSnippet)
+                }
             }
         }
 
@@ -255,13 +270,10 @@ object WebSearchHelper {
         }
 
         val sb = StringBuilder()
-        val resultCount = maxOf(titles.size, snippets.size).coerceAtMost(3)
+        // Ultra-compact format to save tokens and speed up generation
+        val resultCount = minOf(titles.size, snippets.size, 5)
         for (i in 0 until resultCount) {
-            val title = titles.getOrNull(i)
-            val snippet = snippets.getOrNull(i)
-            if (title != null) sb.append("**$title**\n")
-            if (snippet != null) sb.append("$snippet\n")
-            if (i < resultCount - 1) sb.append("\n")
+            sb.append("[${i + 1}] ${titles[i]}: ${snippets[i]}\n")
         }
 
         return sb.toString().trim().ifBlank { null }
