@@ -60,6 +60,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val context = LocalContext.current
     var inputText by remember { mutableStateOf("") }
     var showSettings by remember { mutableStateOf(false) }
+    var showFileSearch by remember { mutableStateOf(false) }
     
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -174,13 +175,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
                             },
                             onStop       = { viewModel.stopGeneration() },
                             onAttach     = { filePicker.launch("*/*") },
-                            onLocalSearch = {
-                                if (inputText.isBlank()) {
-                                    inputText = "find "
-                                } else if (!inputText.lowercase().startsWith("find")) {
-                                    inputText = "find $inputText"
-                                }
-                            },
+                            onLocalSearch = { showFileSearch = true },
                             onWebSearch = {
                                 if (inputText.isBlank()) {
                                     inputText = "search "
@@ -260,6 +255,17 @@ fun ChatScreen(viewModel: ChatViewModel) {
                 }
                 
                 if (state.loadingModel) LoadingOverlay(state.loadProgress, state.loadStatus)
+
+                if (showFileSearch) {
+                    FileSearchDialog(
+                        llmInference = viewModel.llamaInference,
+                        onFileLoadedToChat = { content ->
+                            inputText = content
+                            showFileSearch = false
+                        },
+                        onDismiss = { showFileSearch = false }
+                    )
+                }
 
                 if (showSettings) {
                     val modelsState by viewModel.modelsState.collectAsState()
@@ -885,14 +891,43 @@ private fun SettingsSheet(
 
             Spacer(Modifier.height(16.dp))
 
+            val context = LocalContext.current
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Local Insight Helper", style = MaterialTheme.typography.bodyLarge)
-                    Text("Allow AI to read your local files.", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f))
+                    Text("Local Insight", style = MaterialTheme.typography.bodyLarge)
+                    Text("Describe any file and AI finds it offline", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f))
+                    
+                    // NEW: Show Index Status
+                    val db = remember { com.nomad.data.FileIndexDatabase.getInstance(context) }
+                    var indexCount by remember { mutableStateOf<Int?>(null) }
+                    
+                    LaunchedEffect(state.localFileHelperEnabled) {
+                        if (state.localFileHelperEnabled) {
+                            indexCount = db.dao().count()
+                        }
+                    }
+
+                    if (state.localFileHelperEnabled && indexCount != null) {
+                        Spacer(Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Storage, null, tint = Color.Gray, modifier = Modifier.size(10.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                if (indexCount == 0) "Building index..." else "Index ready: $indexCount files",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (indexCount == 0) Color(0xFF5E9AFF) else Color.Gray
+                            )
+                        }
+                    }
                 }
                 Switch(
                     checked = state.localFileHelperEnabled,
-                    onCheckedChange = onUpdateLocalFileHelper,
+                    onCheckedChange = { enabled ->
+                        onUpdateLocalFileHelper(enabled)
+                        if (enabled) {
+                            com.nomad.data.scheduleIndexing(context)
+                        }
+                    },
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.Black,
                         checkedTrackColor = Color.White,
@@ -900,6 +935,20 @@ private fun SettingsSheet(
                         uncheckedTrackColor = Color.Black
                     )
                 )
+            }
+
+            if (state.localFileHelperEnabled) {
+                Spacer(Modifier.height(16.dp))
+                OutlinedButton(
+                    onClick = { com.nomad.data.scheduleIndexing(context) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f))
+                ) {
+                    Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("RE-INDEX FILES NOW", style = MaterialTheme.typography.labelSmall)
+                }
             }
 
             Spacer(Modifier.height(16.dp))
@@ -1417,6 +1466,14 @@ private fun ChatInputBar(
                             }
                         )
                     }
+                    DropdownMenuItem(
+                        text = { Text("Find File", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.ManageSearch, null, tint = Color.White) },
+                        onClick = {
+                            showMenu = false
+                            onLocalSearch()
+                        }
+                    )
                 }
             }
 

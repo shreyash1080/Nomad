@@ -1,5 +1,5 @@
 //  llama_wrapper.cpp — Production Ready + Maximum Performance
-//  Refactored for stability and Gemma 2 support
+//  Refactored for stability and compatible with latest llama.cpp API
 
 #include <jni.h>
 #include <android/log.h>
@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdio>
 #include <ctime>
+#include <algorithm>
 
 #include "llama.h"
 #include "ggml.h"
@@ -76,11 +77,12 @@ static bool is_valid_utf8(const std::string& text) {
 
 static std::vector<llama_token> tokenize_str(const std::string& text, bool add_special) {
     if (!g_model) return {};
-    int n = -llama_tokenize(g_model, text.c_str(), (int32_t)text.size(),
+    const struct llama_vocab * vocab = llama_model_get_vocab(g_model);
+    int n = -llama_tokenize(vocab, text.c_str(), (int32_t)text.size(),
                             nullptr, 0, add_special, true);
     if (n <= 0) return {};
     std::vector<llama_token> toks(n);
-    int rc = llama_tokenize(g_model, text.c_str(), (int32_t)text.size(),
+    int rc = llama_tokenize(vocab, text.c_str(), (int32_t)text.size(),
                             toks.data(), n, add_special, true);
     if (rc < 0) return {};
     toks.resize(rc);
@@ -153,7 +155,7 @@ Java_com_nomad_engine_LlamaEngine_loadModel(
         jstring modelPath, jint nCtx, jint nThreads, jboolean useGpu)
 {
     if (g_ctx)   { llama_free(g_ctx); g_ctx = nullptr; }
-    if (g_model) { llama_free_model(g_model); g_model = nullptr; }
+    if (g_model) { llama_model_free(g_model); g_model = nullptr; }
     g_prefix_n_tokens = 0;
     g_prefix_tokens.clear();
 
@@ -168,7 +170,7 @@ Java_com_nomad_engine_LlamaEngine_loadModel(
     mp.use_mmap     = true;
 
     std::string path = j2s(env, modelPath);
-    g_model = llama_load_model_from_file(path.c_str(), mp);
+    g_model = llama_model_load_from_file(path.c_str(), mp);
     if (!g_model) return JNI_FALSE;
 
     g_n_threads = (nThreads > 0) ? nThreads : p_count;
@@ -179,15 +181,15 @@ Java_com_nomad_engine_LlamaEngine_loadModel(
     cp.n_ctx           = (uint32_t)nCtx;
     cp.n_threads       = (int32_t)g_n_threads;
     cp.n_threads_batch = (int32_t)g_n_threads_batch;
-    cp.flash_attn      = true;
     cp.offload_kqv     = useGpu;
 
-    g_ctx = llama_new_context_with_model(g_model, cp);
-    if (!g_ctx) { llama_free_model(g_model); g_model = nullptr; return JNI_FALSE; }
+    g_ctx = llama_init_from_model(g_model, cp);
+    if (!g_ctx) { llama_model_free(g_model); g_model = nullptr; return JNI_FALSE; }
     g_n_ctx = nCtx;
 
     // Warm-up
-    llama_token bos = llama_token_bos(g_model);
+    const struct llama_vocab * vocab = llama_model_get_vocab(g_model);
+    llama_token bos = llama_vocab_bos(vocab);
     if (bos != LLAMA_TOKEN_NULL) {
         llama_batch wb = llama_batch_init(1, 0, 1);
         wb.token[0]    = bos;
@@ -198,7 +200,7 @@ Java_com_nomad_engine_LlamaEngine_loadModel(
         wb.n_tokens    = 1;
         llama_decode(g_ctx, wb);
         llama_batch_free(wb);
-        llama_kv_cache_clear(g_ctx);
+        llama_memory_seq_rm(llama_get_memory(g_ctx), -1, -1, -1);
     }
 
     LOGI("Model loaded: %s, threads=%d", path.c_str(), g_n_threads);
@@ -216,7 +218,7 @@ Java_com_nomad_engine_LlamaEngine_cacheSystemPrompt(
     g_prefix_tokens = tokenize_str(prefix, true);
     if (g_prefix_tokens.empty()) return JNI_FALSE;
 
-    llama_kv_cache_clear(g_ctx);
+    llama_memory_seq_rm(llama_get_memory(g_ctx), -1, -1, -1);
 
     // Use a robust batch setup
     int n_toks = (int)g_prefix_tokens.size();
@@ -287,16 +289,15 @@ Java_com_nomad_engine_LlamaEngine_generate(
             if (all_tokens[i] != g_prefix_tokens[i]) { match = false; break; }
         }
         if (match) {
-            // Use -1 to clear all sequences at this position range
-            llama_kv_cache_seq_rm(g_ctx, -1, g_prefix_n_tokens, -1);
+            llama_memory_seq_rm(llama_get_memory(g_ctx), -1, g_prefix_n_tokens, -1);
             decode_start = g_prefix_n_tokens;
             LOGI("Prefix matched: skipping %d tokens", g_prefix_n_tokens);
         } else {
-            llama_kv_cache_clear(g_ctx);
+            llama_memory_seq_rm(llama_get_memory(g_ctx), -1, -1, -1);
             decode_start = 0;
         }
     } else {
-        llama_kv_cache_clear(g_ctx);
+        llama_memory_seq_rm(llama_get_memory(g_ctx), -1, -1, -1);
         decode_start = 0;
     }
 
@@ -353,13 +354,15 @@ Java_com_nomad_engine_LlamaEngine_generate(
     nb.seq_id[0][0] = 0;
     nb.logits[0] = true;
 
+    const struct llama_vocab * vocab = llama_model_get_vocab(g_model);
+
     for (int i = 0; i < maxTokens && !g_stop.load() && !stopped; i++) {
         llama_token tok = llama_sampler_sample(chain, g_ctx, -1);
         llama_sampler_accept(chain, tok);
 
-        if (llama_token_is_eog(g_model, tok)) break;
+        if (llama_vocab_is_eog(vocab, tok)) break;
 
-        int n = llama_token_to_piece(g_model, tok, buf, sizeof(buf)-1, 0, true);
+        int n = llama_token_to_piece(vocab, tok, buf, sizeof(buf)-1, 0, true);
         if (n <= 0) break;
         buf[n] = '\0';
         result += buf;
@@ -410,7 +413,7 @@ JNIEXPORT void JNICALL Java_com_nomad_engine_LlamaEngine_unloadModel(JNIEnv*, jc
     g_stop.store(true);
     g_utf8_cache.clear();
     if (g_ctx) llama_free(g_ctx);
-    if (g_model) llama_free_model(g_model);
+    if (g_model) llama_model_free(g_model);
     g_ctx = nullptr; g_model = nullptr;
     llama_backend_free();
 }
@@ -428,8 +431,8 @@ JNIEXPORT jstring JNICALL Java_com_nomad_engine_LlamaEngine_getModelInfo(JNIEnv*
     if (!g_model) return env->NewStringUTF("{}");
     char buf[512];
     snprintf(buf, sizeof(buf), R"({"n_params":%lld,"n_ctx_train":%d,"n_embd":%d,"n_layer":%d})",
-             (long long)llama_model_n_params(g_model), llama_n_ctx_train(g_model),
-             llama_n_embd(g_model), llama_n_layer(g_model));
+             (long long)llama_model_n_params(g_model), llama_model_n_ctx_train(g_model),
+             llama_model_n_embd(g_model), llama_model_n_layer(g_model));
     return env->NewStringUTF(buf);
 }
 

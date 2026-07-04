@@ -94,6 +94,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val modelManager = ModelManager(application)
     val historyManager = ChatHistoryManager(application)
 
+    val llamaInference = com.nomad.engine.LlamaInferenceAdapter { prompt, onToken ->
+        LlamaEngine.generate(
+            prompt = prompt,
+            maxTokens = 200,
+            temperature = 0.1f,
+            topP = 0.9f,
+            callback = object : LlamaEngine.TokenCallback {
+                override fun onToken(piece: String): Boolean {
+                    onToken(piece)
+                    return true
+                }
+            }
+        )
+    }
+
     private val _chat = MutableStateFlow(ChatUiState())
     val chatState: StateFlow<ChatUiState> = _chat
     private val _models = MutableStateFlow(ModelsUiState())
@@ -918,19 +933,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * even if both were somehow enabled.
      */
     fun updateLocalFileHelper(enabled: Boolean) {
-        if (enabled) {
-            _chat.update {
-                it.copy(
-                    error = "Local Insight (Beta) is currently disabled for further optimization. Please use Web Search for now.",
-                    localFileHelperEnabled = false
-                )
-            }
-            return
-        }
-        _chat.update { it.copy(localFileHelperEnabled = false) }
+        _chat.update { it.copy(localFileHelperEnabled = enabled) }
         getApplication<Application>()
             .getSharedPreferences("nomad_prefs", Context.MODE_PRIVATE)
-            .edit().putBoolean("local_file_helper", false).apply()
+            .edit().putBoolean("local_file_helper", enabled).apply()
     }
 
     fun dismissPermissionRationale() {

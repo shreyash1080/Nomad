@@ -24,6 +24,7 @@ import kotlin.system.exitProcess
 class MainActivity : ComponentActivity() {
 
     private val viewModel: ChatViewModel by viewModels()
+    private val observers = mutableListOf<com.nomad.data.FileChangeObserver>()
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -58,10 +59,46 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                LaunchedEffect(state.localFileHelperEnabled) {
+                    if (state.localFileHelperEnabled) {
+                        setupFileObservers()
+                    } else {
+                        stopFileObservers()
+                    }
+                }
+
                 NomadApp(viewModel)
             }
         }
     }
+
+    private fun setupFileObservers() {
+        stopFileObservers()
+        val roots = listOf(
+            android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+            android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOCUMENTS),
+            android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DCIM),
+            android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_PICTURES)
+        )
+        roots.forEach { root ->
+            if (root.exists()) {
+                val obs = com.nomad.data.FileChangeObserver(this, root.absolutePath)
+                obs.startWatching()
+                observers.add(obs)
+            }
+        }
+    }
+
+    private fun stopFileObservers() {
+        observers.forEach { it.stopWatching() }
+        observers.clear()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopFileObservers()
+    }
+
 
     private fun checkPermissions() {
         val permissions = mutableListOf<String>()
